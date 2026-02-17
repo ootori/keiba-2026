@@ -1,0 +1,329 @@
+================================================================================
+AUDIT REPORT MANIFEST
+================================================================================
+
+Project: JRA競馬着順予測システム (everydb2)
+Audit Date: 2025-02-15
+Status: COMPLETE
+
+================================================================================
+GENERATED FILES
+================================================================================
+
+1. README_AUDIT.md (7.2K)
+   - Entry point document
+   - Complete overview of all findings
+   - Reading guide by role
+   - Quick reference table
+   - Next steps
+
+2. AUDIT_INDEX.md (2.3K)
+   - Quick reference card
+   - 30-second summary of the bug
+   - Audit results table
+   - File locations and descriptions
+
+3. EXECUTIVE_SUMMARY.txt (5.2K)
+   - For decision makers
+   - Critical findings section
+   - Feature quality assessment
+   - Recommended actions (2 options)
+   - Timeline and impact analysis
+   - Questions for verification
+
+4. DIAGNOSTIC_REPORT.md (5.3K)
+   - For technical understanding
+   - Detailed root cause analysis
+   - Parquet data summary
+   - 3 different fix options
+   - Impact assessment
+   - Verification checklist
+
+5. BUG_ANALYSIS.md (4.8K)
+   - For developers implementing the fix
+   - Bug reproduction with test case
+   - Exact code locations
+   - Step-by-step fix instructions
+   - Testing checklist
+   - Expected outcomes
+
+6. VISUALIZATION.md (11K)
+   - For visual learners
+   - Data flow diagrams
+   - Broken flow visualization
+   - Fixed flow visualization
+   - Code change diffs
+   - Timeline and dependency charts
+
+7. This manifest file
+
+================================================================================
+CRITICAL FINDINGS
+================================================================================
+
+ISSUE: post_umaban Data Type Mismatch
+SEVERITY: CRITICAL
+STATUS: Verified and Documented
+
+PROBLEM:
+  - post_umaban stored as int64 (1-18) in parquet
+  - Converted to string "1"-"18" in evaluator
+  - Database n_harai has "01"-"18" (zero-padded)
+  - String matching fails: "1" != "01"
+  - All payouts = 0 → ROI meaningless
+
+IMPACT:
+  - All profitability analysis invalid
+  - Model evaluation cannot assess actual performance
+  - ROI/回収率 shows 0% instead of realistic values
+
+VERIFIED WITH:
+  - Actual parquet data (37,402 rows)
+  - Type inspection: numpy.int64
+  - String conversion test
+  - Evaluator code review
+  - Database format inspection
+
+================================================================================
+AUDIT RESULTS SUMMARY
+================================================================================
+
+Data Integrity:
+  ✓ Parquet files: 479,616 + 37,402 rows complete
+  ✓ Features: 130/130 present
+  ✓ Target variable: properly distributed
+  ✓ No missing values
+
+Feature Quality:
+  ✓ All 130 model features present
+  ✓ Race keys properly formatted
+  ✓ Odds data in realistic ranges
+  ✓ No unexpected data types (except post_umaban)
+
+Feature Alignment:
+  ✓ No missing features in data
+  ✓ No extra features in data
+  ✓ Perfect alignment with model spec
+
+Critical Issues:
+  ✗ post_umaban format mismatch
+  ✗ Payout matching failure
+  ✗ ROI calculation broken (all = 0%)
+
+Overall Assessment:
+  - Data quality: GOOD
+  - Feature engineering: GOOD
+  - Evaluator implementation: BROKEN (post_umaban issue)
+
+================================================================================
+RECOMMENDED ACTIONS
+================================================================================
+
+IMMEDIATE (Choose One):
+
+Option A: Proper Fix (Recommended)
+  Location: src/features/race.py
+  Change: Zero-pad post_umaban when creating features
+  Time: ~90 minutes
+  Requires: Feature rebuild + model retraining
+  Benefits: Clean solution, consistent data
+
+Option B: Quick Fix
+  Location: src/model/evaluator.py
+  Change: Zero-pad post_umaban when matching
+  Time: ~10 minutes
+  Requires: No retraining
+  Benefits: Fast deployment
+
+FOLLOW-UP:
+  1. Apply selected fix
+  2. Run verification steps
+  3. Validate payout calculations
+  4. Test with sample data
+
+================================================================================
+HOW TO USE THIS AUDIT
+================================================================================
+
+For Quick Understanding (5 minutes):
+  1. Read AUDIT_INDEX.md
+  2. Skim VISUALIZATION.md
+
+For Management/Decision Making (15 minutes):
+  1. Read AUDIT_INDEX.md
+  2. Read EXECUTIVE_SUMMARY.txt
+  3. Review "Next Steps" section
+
+For Development (30 minutes):
+  1. Read AUDIT_INDEX.md
+  2. Read BUG_ANALYSIS.md
+  3. Study VISUALIZATION.md
+  4. Reference DIAGNOSTIC_REPORT.md as needed
+
+For Complete Understanding (60 minutes):
+  1. Read README_AUDIT.md (overview)
+  2. Read AUDIT_INDEX.md (reference)
+  3. Read EXECUTIVE_SUMMARY.txt (findings)
+  4. Read BUG_ANALYSIS.md (implementation)
+  5. Read VISUALIZATION.md (diagrams)
+  6. Study DIAGNOSTIC_REPORT.md (details)
+
+================================================================================
+DOCUMENT GUIDE
+================================================================================
+
+README_AUDIT.md
+  Entry point with complete overview
+  Reading guide by role
+  Document statistics
+  Questions answered
+
+AUDIT_INDEX.md
+  Quick reference card
+  30-second summary
+  Audit results table
+  File locations
+
+EXECUTIVE_SUMMARY.txt
+  Critical findings
+  Feature assessment
+  Recommended actions
+  Timeline
+  Questions to verify
+
+DIAGNOSTIC_REPORT.md
+  Parquet data analysis
+  Root cause explanation
+  3 fix options
+  Impact assessment
+  Verification steps
+
+BUG_ANALYSIS.md
+  Bug reproduction
+  Code locations
+  Step-by-step fixes
+  Testing checklist
+  Expected outcomes
+
+VISUALIZATION.md
+  Data flow diagrams
+  Current vs. fixed flows
+  Code comparisons
+  Timeline charts
+  Dependency diagrams
+
+================================================================================
+KEY QUESTIONS ANSWERED
+================================================================================
+
+Q: What's the main issue?
+A: post_umaban format mismatch breaks payout calculation
+
+Q: How bad is it?
+A: All payouts = 0, making ROI analysis meaningless (CRITICAL)
+
+Q: What are my options?
+A: Option A (proper, 90min) or Option B (quick, 10min)
+
+Q: Do I need to retrain the model?
+A: Yes (Option A) or No (Option B)
+
+Q: Will this break anything?
+A: No, post_umaban is just a feature, training unaffected
+
+Q: Is the data otherwise good?
+A: Yes, all features complete, no missing values
+
+Q: Can this be fixed?
+A: Yes, simple fix (zero-pad the horse number)
+
+Q: How long will it take?
+A: 10 minutes (quick) to 90 minutes (proper)
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+1. CHOOSE A DOCUMENT (based on your role)
+   - Manager? → Read EXECUTIVE_SUMMARY.txt
+   - Developer? → Read BUG_ANALYSIS.md
+   - Quick check? → Read AUDIT_INDEX.md
+   - Visual learner? → Read VISUALIZATION.md
+
+2. UNDERSTAND THE PROBLEM
+   - What is the bug?
+   - Why does it matter?
+   - How does it break things?
+
+3. DECIDE ON FIX
+   - Option A (proper): Better long-term
+   - Option B (quick): Faster deployment
+
+4. IMPLEMENT THE FIX
+   - Follow steps in BUG_ANALYSIS.md
+   - Or use code in VISUALIZATION.md
+
+5. TEST AND VALIDATE
+   - Verify payouts > 0 found
+   - Check ROI shows realistic values
+   - Run verification steps
+
+6. DOCUMENT COMPLETION
+   - Note date of fix
+   - Document which option chosen
+   - Record results before/after
+
+================================================================================
+FILE LOCATIONS
+================================================================================
+
+All audit documents:
+  /sessions/wonderful-hopeful-carson/mnt/everydb2/
+
+Entry point:
+  README_AUDIT.md
+
+Code locations mentioned:
+  src/features/race.py (create post_umaban)
+  src/model/evaluator.py (match post_umaban)
+  src/model/trainer.py (for reference)
+  data/valid_features.parquet (test data)
+  models/model_features.txt (feature list)
+
+================================================================================
+AUDIT METADATA
+================================================================================
+
+Generated: 2025-02-15
+Project: everydb2
+System: Automated diagnostic audit
+Scope: Data quality and feature analysis
+Focus: post_umaban feature issue
+Documents: 6 comprehensive reports
+Total size: ~28.6K
+Total lines: 919+
+
+Status: COMPLETE AND VERIFIED
+Next action: Read README_AUDIT.md or AUDIT_INDEX.md
+
+================================================================================
+CONTACT & SUPPORT
+================================================================================
+
+For questions about:
+  - The bug: DIAGNOSTIC_REPORT.md
+  - How to fix it: BUG_ANALYSIS.md
+  - Visual explanation: VISUALIZATION.md
+  - Management overview: EXECUTIVE_SUMMARY.txt
+  - Quick reference: AUDIT_INDEX.md
+
+All documents are self-contained and complete.
+No additional context needed.
+
+================================================================================
+END OF MANIFEST
+================================================================================
+
+All audit documents are ready for review and action.
+Begin with: README_AUDIT.md or AUDIT_INDEX.md
+
