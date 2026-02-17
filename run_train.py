@@ -2,11 +2,14 @@
 """学習実行スクリプト.
 
 使用例:
-    # 基本的な学習（デフォルト設定）
+    # 基本的な学習（デフォルト設定、年度別 parquet で構築）
     python run_train.py
 
-    # 特徴量構築のみ
-    python run_train.py --build-features-only
+    # 4並列で特徴量構築
+    python run_train.py --workers 4
+
+    # 特徴量構築のみ（8並列、既存を再構築）
+    python run_train.py --build-features-only --workers 8 --force-rebuild
 
     # 既存特徴量を使ってモデル学習のみ
     python run_train.py --train-only
@@ -98,6 +101,17 @@ def parse_args() -> argparse.Namespace:
         default=VALID_YEAR,
         help=f"検証年（デフォルト: {VALID_YEAR}）",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="特徴量構築の並列ワーカー数（デフォルト: 1 = 直列）",
+    )
+    parser.add_argument(
+        "--force-rebuild",
+        action="store_true",
+        help="既存の年度別 parquet を無視して全年度を再構築",
+    )
     return parser.parse_args()
 
 
@@ -123,45 +137,66 @@ def step_build_features(
     args: argparse.Namespace,
     include_odds: bool,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Step 1: 特徴量構築."""
+    """Step 1: 特徴量構築（年度別 parquet 方式）."""
     logger.info("=" * 60)
-    logger.info("Step 1: 特徴量構築")
+    logger.info("Step 1: 特徴量構築（年度別, workers=%d）", args.workers)
     logger.info("=" * 60)
 
-    pipeline = FeaturePipeline(include_odds=include_odds)
-
-    # 学習データ
+    # 学習データ（複数年）
     logger.info("学習データ構築中 (%s〜%s)...", args.train_start, args.train_end)
-    train_df = pipeline.build_dataset(
+    train_df = FeaturePipeline.build_years(
         year_start=args.train_start,
         year_end=args.train_end,
-        save_parquet=True,
-        output_name="train_features",
+        include_odds=include_odds,
+        workers=args.workers,
+        force_rebuild=args.force_rebuild,
     )
 
-    # 検証データ
+    # 検証データ（1年分）
     logger.info("検証データ構築中 (%s)...", args.valid_year)
-    valid_df = pipeline.build_dataset(
+    valid_df = FeaturePipeline.build_years(
         year_start=args.valid_year,
         year_end=args.valid_year,
-        save_parquet=True,
-        output_name="valid_features",
+        include_odds=include_odds,
+        workers=1,  # 1年分なので直列で十分
+        force_rebuild=args.force_rebuild,
     )
 
     logger.info("学習データ: %d行, 検証データ: %d行", len(train_df), len(valid_df))
     return train_df, valid_df
 
 
-def step_load_features() -> tuple[pd.DataFrame, pd.DataFrame]:
-    """既存の特徴量parquetを読み込む."""
+def step_load_features(
+    args: argparse.Namespace,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """既存の特徴量 parquet を読み込む.
+
+    年度別 parquet（features_{year}.parquet）を優先してロードする。
+    見つからない場合は旧方式（train_features.parquet / valid_features.parquet）を試みる。
+    """
+    # 年度別 parquet の存在チェック
+    try:
+        train_df = FeaturePipeline.load_years(args.train_start, args.train_end)
+        valid_df = FeaturePipeline.load_years(args.valid_year, args.valid_year)
+        logger.info(
+            "年度別ロード完了: 学習=%d行, 検証=%d行",
+            len(train_df), len(valid_df),
+        )
+        return train_df, valid_df
+    except FileNotFoundError:
+        pass
+
+    # 旧方式へのフォールバック
     train_path = DATA_DIR / "train_features.parquet"
     valid_path = DATA_DIR / "valid_features.parquet"
 
     if not train_path.exists() or not valid_path.exists():
         raise FileNotFoundError(
-            "特徴量ファイルが見つかりません。先に --build-features-only で構築してください。"
+            "特徴量ファイルが見つかりません。"
+            " --build-features-only で構築してください。"
         )
 
+    logger.info("旧方式 parquet からロード")
     train_df = pd.read_parquet(train_path)
     valid_df = pd.read_parquet(valid_path)
     logger.info("特徴量ロード: 学習=%d行, 検証=%d行", len(train_df), len(valid_df))
@@ -241,15 +276,15 @@ def step_train(
         )
 
 
-def step_eval_only(model_name: str) -> None:
+def step_eval_only(args: argparse.Namespace) -> None:
     """Step 4-5 のみ: 既存モデル+特徴量で評価・回収率シミュレーションを実行."""
     # 特徴量ロード
-    _, valid_df = step_load_features()
+    _, valid_df = step_load_features(args)
     valid_df = valid_df.dropna(subset=["target"]).copy()
 
     # モデルロード
     trainer = ModelTrainer()
-    model = trainer.load_model(name=model_name)
+    model = trainer.load_model(name=args.model_name)
 
     # 評価
     logger.info("=" * 60)
@@ -300,11 +335,11 @@ def main() -> None:
 
     if args.eval_only:
         # 評価・回収率シミュレーションのみ
-        step_eval_only(args.model_name)
+        step_eval_only(args)
 
     elif args.train_only:
         # 既存特徴量からの学習のみ
-        train_df, valid_df = step_load_features()
+        train_df, valid_df = step_load_features(args)
         step_train(train_df, valid_df, args.model_name)
 
     elif args.build_features_only:

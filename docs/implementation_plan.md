@@ -553,7 +553,7 @@ PostgreSQLへの接続はsrc/db.pyのquery_dfを使ってください。
 
 ---
 
-## 実装状況（2026-02-15時点）
+## 実装状況（2026-02-17時点）
 
 ### Phase 0-4: 全Phase実装完了
 
@@ -585,6 +585,9 @@ PostgreSQLへの接続はsrc/db.pyのquery_dfを使ってください。
 | オッズ取得 | datakubun優先度で取得 | datakubunフィルタなし | n_odds_tanpuku明細テーブルにはdatakubunカラムが存在しない |
 | 払戻データ取得 | カラム名ハードコード | スキーマから動的検出 | n_haraiのカラム命名規則がEveryDB2バージョン依存のため |
 | run_train.py | 基本オプションのみ | --eval-only追加 | Step 4-5の再実行を高速化するため |
+| 特徴量保存 | 全年度一括 parquet | 年度別 parquet + 並列構築 | 10年分の構築に丸一日かかるため。年度別分割で差分再構築・並列化に対応（`--workers N`、`--force-rebuild`） |
+| 回収率シミュレーション | 単勝/複勝のみ | 単勝/複勝/馬連/馬単/三連複/三連単 | 多券種での回収率比較を可能にするため。n_haraiから6賭式の払戻を動的検出 |
+| 払戻カラム検出 | `umaban` キーワードのみ | `umaban` + `kumi` キーワード | 馬連/馬単/三連複/三連単は組番（kumi）を使う可能性があるため。`sanrentan`/`sanren` の部分一致誤検出も防止 |
 
 ### テスト状況
 
@@ -619,4 +622,9 @@ PostgreSQLへの接続はsrc/db.pyのquery_dfを使ってください。
 ### 5. column "paytansyo1umaban" does not exist (n_harai)
 
 **原因:** `n_harai` テーブルの払戻カラム命名規則（番号の位置等）がDBリファレンスの `PayTansyo*` ワイルドカード表記では不明確で、実際のDBと一致しなかった
-**解決:** `evaluator.py` の `_get_harai_data()` を書き換え、`SELECT * FROM n_harai LIMIT 0` でスキーマを取得し、`tansyo`+`umaban` パターンでカラムを動的検出する方式に変更。`_find_pay_column_pairs()` ヘルパーメソッドを追加
+**解決:** `evaluator.py` の `_get_harai_data()` を書き換え、`SELECT * FROM n_harai LIMIT 0` でスキーマを取得し、`tansyo`+`umaban` パターンでカラムを動的検出する方式に変更。`_find_pay_column_pairs()` ヘルパーメソッドを追加。後に馬連/馬単/三連複/三連単にも拡張し、`kumi` キーワードにも対応。
+
+### 6. 特徴量構築が遅い（10年分で丸一日）
+
+**原因:** `build_dataset()` が全年度を直列処理していた
+**解決:** 年度別に parquet を分割保存し、`ProcessPoolExecutor` で並列構築する方式に変更。`--workers N` で並列度を指定可能。既存 parquet がある年度は `--force-rebuild` なしならスキップされるため、差分再構築も高速

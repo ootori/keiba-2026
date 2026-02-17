@@ -1,11 +1,14 @@
 """特徴量パイプライン統合 + クロス特徴量（カテゴリ16）.
 
 全特徴量抽出器を束ね、レース単位・年度単位で特徴量DataFrameを構築する。
+年度別 parquet 保存と並列構築をサポートする。
 """
 
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -31,6 +34,51 @@ from src.features.odds import OddsFeatureExtractor
 from src.utils.code_master import track_type, distance_category
 
 logger = logging.getLogger(__name__)
+
+
+# ------------------------------------------------------------------
+# 年度別 parquet ヘルパー
+# ------------------------------------------------------------------
+
+def year_parquet_path(year: str) -> Path:
+    """年度別 parquet のファイルパスを返す."""
+    return DATA_DIR / f"features_{year}.parquet"
+
+
+def _build_year_worker(
+    year: str,
+    include_odds: bool,
+    force_rebuild: bool,
+) -> str:
+    """ProcessPoolExecutor 用のワーカー関数.
+
+    各プロセスで FeaturePipeline を新規生成し、1年分の特徴量を構築する。
+    pickle 可能にするためクラスメソッドではなくモジュールレベル関数とする。
+
+    Args:
+        year: 対象年（文字列）
+        include_odds: オッズ特徴量を含めるか
+        force_rebuild: True の場合、既存 parquet を無視して再構築
+
+    Returns:
+        完了メッセージ文字列
+    """
+    path = year_parquet_path(year)
+    if not force_rebuild and path.exists():
+        return f"{year}: スキップ（既存 parquet あり）"
+
+    pipeline = FeaturePipeline(include_odds=include_odds)
+    df = pipeline.build_dataset(
+        year_start=year,
+        year_end=year,
+        save_parquet=False,
+    )
+    if df.empty:
+        return f"{year}: 特徴量なし（0行）"
+
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(path, index=False)
+    return f"{year}: {len(df)}行を保存"
 
 
 class FeaturePipeline:
@@ -117,6 +165,146 @@ class FeaturePipeline:
         result = self._add_cross_features(result, race_key)
 
         return result
+
+    # ------------------------------------------------------------------
+    # 年度別ビルド & 並列実行
+    # ------------------------------------------------------------------
+
+    def build_year(
+        self,
+        year: str,
+        force_rebuild: bool = False,
+    ) -> pd.DataFrame:
+        """1年分の特徴量を構築し年度別 parquet に保存する.
+
+        Args:
+            year: 対象年（例: "2024"）
+            force_rebuild: True の場合、既存 parquet を無視して再構築
+
+        Returns:
+            特徴量 DataFrame
+        """
+        path = year_parquet_path(year)
+        if not force_rebuild and path.exists():
+            logger.info("%s: 既存 parquet を使用", year)
+            return pd.read_parquet(path)
+
+        df = self.build_dataset(
+            year_start=year,
+            year_end=year,
+            save_parquet=False,
+        )
+        if not df.empty:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(path, index=False)
+            logger.info("%s: %d行を保存 → %s", year, len(df), path)
+        return df
+
+    @staticmethod
+    def build_years(
+        year_start: str,
+        year_end: str,
+        include_odds: bool = False,
+        workers: int = 1,
+        force_rebuild: bool = False,
+    ) -> pd.DataFrame:
+        """複数年度の特徴量を構築する（並列対応）.
+
+        workers == 1 の場合は直列で build_year() を呼ぶ。
+        workers >= 2 の場合は ProcessPoolExecutor で並列実行する。
+
+        Args:
+            year_start: 開始年
+            year_end: 終了年
+            include_odds: オッズ特徴量を含めるか
+            workers: 並列ワーカー数（1 = 直列）
+            force_rebuild: 既存 parquet を無視して再構築
+
+        Returns:
+            全年度を結合した DataFrame
+        """
+        years = [
+            str(y) for y in range(int(year_start), int(year_end) + 1)
+        ]
+        logger.info(
+            "年度別特徴量構築: %s〜%s (%d年分, workers=%d)",
+            year_start, year_end, len(years), workers,
+        )
+
+        if workers <= 1:
+            # 直列実行
+            pipeline = FeaturePipeline(include_odds=include_odds)
+            for year in years:
+                pipeline.build_year(year, force_rebuild=force_rebuild)
+        else:
+            # 並列実行（ProcessPoolExecutor）
+            futures = {}
+            with ProcessPoolExecutor(max_workers=workers) as executor:
+                for year in years:
+                    fut = executor.submit(
+                        _build_year_worker, year, include_odds, force_rebuild,
+                    )
+                    futures[fut] = year
+
+                for fut in tqdm(
+                    as_completed(futures),
+                    total=len(futures),
+                    desc="年度別構築",
+                ):
+                    year = futures[fut]
+                    try:
+                        msg = fut.result()
+                        logger.info(msg)
+                    except Exception as e:
+                        logger.error("%s: エラー — %s", year, e)
+
+        return FeaturePipeline.load_years(year_start, year_end)
+
+    @staticmethod
+    def load_years(
+        year_start: str,
+        year_end: str,
+    ) -> pd.DataFrame:
+        """年度別 parquet を結合してロードする.
+
+        Args:
+            year_start: 開始年
+            year_end: 終了年
+
+        Returns:
+            全年度を結合した DataFrame
+
+        Raises:
+            FileNotFoundError: いずれかの年度の parquet が見つからない場合
+        """
+        years = [
+            str(y) for y in range(int(year_start), int(year_end) + 1)
+        ]
+        dfs: list[pd.DataFrame] = []
+        missing: list[str] = []
+        for year in years:
+            path = year_parquet_path(year)
+            if path.exists():
+                dfs.append(pd.read_parquet(path))
+            else:
+                missing.append(year)
+
+        if missing:
+            raise FileNotFoundError(
+                f"年度別 parquet が見つかりません: {missing}。"
+                " --build-features-only で構築してください。"
+            )
+
+        result = pd.concat(dfs, ignore_index=True)
+        logger.info(
+            "年度別ロード: %s〜%s → %d行",
+            year_start, year_end, len(result),
+        )
+        return result
+
+    # ------------------------------------------------------------------
+    # 旧インターフェース（後方互換）
+    # ------------------------------------------------------------------
 
     def build_dataset(
         self,

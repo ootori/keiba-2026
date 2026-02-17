@@ -86,7 +86,7 @@ everydb2/
 |---------------|---------------|-----------|------|
 | `TimeDIFN` | `timediff` | n_uma_race | タイム差カラム。リファレンスは`TimeDIFN`だがDBでは`timediff` |
 | `DataKubun` | *(存在しない)* | n_odds_tanpuku | 明細テーブルにはDataKubunなし。ヘッダ(`n_odds_tanpukuwaku_head`)にのみ存在 |
-| `PayTansyo*` | *(動的検出)* | n_harai | 払戻カラムの命名規則がバージョン依存のため、`evaluator.py`ではスキーマから動的検出 |
+| `PayTansyo*` 等 | *(動的検出)* | n_harai | 単勝/複勝/馬連/馬単/三連複/三連単の払戻カラムの命名規則がバージョン依存のため、`evaluator.py`ではスキーマから動的検出（`umaban` または `kumi` キーワードで探索） |
 
 ### テーブル別 DataKubun の扱い
 
@@ -193,6 +193,15 @@ python run_train.py --train-start 2024 --train-end 2024 --valid-year 2025
 # 特徴量構築のみ（parquet保存まで）
 python run_train.py --build-features-only
 
+# 4並列で特徴量構築（年度別に並列実行）
+python run_train.py --build-features-only --workers 4
+
+# 既存parquetを無視して全年度を再構築（8並列）
+python run_train.py --build-features-only --workers 8 --force-rebuild
+
+# 特定年度だけ再構築（他の年はスキップ）
+python run_train.py --build-features-only --train-start 2020 --train-end 2020 --force-rebuild
+
 # 既存特徴量からモデル学習のみ
 python run_train.py --train-only
 
@@ -205,6 +214,35 @@ python run_train.py --with-odds
 # モデル名を指定
 python run_train.py --model-name my_model
 ```
+
+## 特徴量の年度別保存と並列構築
+
+特徴量は年度別の parquet ファイル（`data/features_{year}.parquet`）に保存される。
+これにより以下の利点がある:
+
+- **差分再構築:** 特徴量設計を変更した場合、変更が必要な年度だけ `--force-rebuild` で再構築できる
+- **並列構築:** `--workers N` で N 年分を同時に構築でき、10年分の構築時間を大幅に短縮
+- **増分追加:** 新年度のデータが追加された場合、その年度だけ構築すればよい
+
+```
+data/
+├── features_2015.parquet    # 年度別（現行方式）
+├── features_2016.parquet
+├── ...
+├── features_2025.parquet
+├── train_features.parquet   # 旧方式（後方互換、--train-only/--eval-only のフォールバック用）
+└── valid_features.parquet   # 旧方式
+```
+
+**並列化の仕組み:**
+- `ProcessPoolExecutor` で年度ごとに独立したプロセスを起動
+- 各プロセスで `FeaturePipeline` を新規生成し、独自の DB 接続を使用
+- `psycopg2` は `query_df()` 呼び出しごとに接続を生成・破棄するためプロセス間の競合なし
+
+**API:**
+- `FeaturePipeline.build_years(year_start, year_end, workers=N)` — 並列構築
+- `FeaturePipeline.load_years(year_start, year_end)` — 年度別 parquet を結合ロード
+- `FeaturePipeline.build_year(year)` — 単年度構築（直列用）
 
 ## LightGBM categorical_feature の注意
 
@@ -222,3 +260,22 @@ python run_train.py --model-name my_model
 - **n_odds_tanpuku にDataKubunなし:** オッズ明細テーブルは最新データで上書きされるため、フィルタ不要。**この仕様により確定オッズがリークするため、オッズ特徴量はデフォルトで除外している（`--with-odds` で明示的に含めない限り使用しない）**
 - **n_harai のカラム名:** EveryDB2バージョンにより命名規則が異なる可能性あり。`evaluator.py` ではスキーマから動的検出する方式を採用
 - **馬番のゼロパディング:** n_haraiの馬番は2桁ゼロ埋め（"01", "02"）だが、予測側のpost_umabanはint由来（"1", "2"）。`evaluator.py` の `_format_umaban()` でゼロパディング変換を行い、払戻データと正しくマッチさせている
+- **組番フォーマット（馬連/馬単/三連複/三連単）:** n_haraiの組番は2桁ゼロ埋め馬番の連結（馬連/馬単: 4桁 "0102"、三連複/三連単: 6桁 "010203"）。馬連・三連複はソート済み（小さい番号が先）、馬単・三連単は着順通り
+
+## 回収率シミュレーション戦略
+
+`evaluator.py` の `simulate_return()` で使用可能な戦略:
+
+| 戦略名 | 賭式 | ロジック |
+|--------|------|---------|
+| `top1_tansho` | 単勝 | 予測1位の単勝を購入 |
+| `top1_fukusho` | 複勝 | 予測1位の複勝を購入 |
+| `top3_fukusho` | 複勝 | 予測Top3の複勝を各100円購入 |
+| `top2_umaren` | 馬連 | 予測Top2の馬連を購入 |
+| `top2_umatan` | 馬単 | 予測Top2の馬単を購入（1位→2位の順） |
+| `top3_sanrenpuku` | 三連複 | 予測Top3の三連複を購入 |
+| `top3_sanrentan` | 三連単 | 予測Top3の三連単を購入（1位→2位→3位の順） |
+| `value_bet` | 単勝 | 期待値ベースの購入（オッズ×確率が閾値以上） |
+
+**n_harai からの払戻データ取得:**
+`_get_harai_data()` は6賭式（tansyo/fukusyo/umaren/umatan/sanren/sanrentan）の払戻カラムをスキーマから動的検出する。検出時は `sanrentan` を `sanren` より先に検出することで部分一致の誤マッチを防いでいる。
