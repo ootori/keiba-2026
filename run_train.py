@@ -223,7 +223,11 @@ def step_train(
     logger.info("=" * 60)
     logger.info("Step 5: 回収率シミュレーション")
     logger.info("=" * 60)
-    for strategy in ["top1_tansho", "top1_fukusho", "top3_fukusho", "value_bet"]:
+    for strategy in [
+        "top1_tansho", "top1_fukusho", "top3_fukusho",
+        "top2_umaren", "top2_umatan", "top3_sanrenpuku", "top3_sanrentan",
+        "value_bet",
+    ]:
         result = evaluator.simulate_return(
             valid_df, trainer.feature_columns, model, strategy=strategy
         )
@@ -267,7 +271,11 @@ def step_eval_only(model_name: str) -> None:
     logger.info("=" * 60)
     logger.info("Step 5: 回収率シミュレーション")
     logger.info("=" * 60)
-    for strategy in ["top1_tansho", "top1_fukusho", "top3_fukusho", "value_bet"]:
+    for strategy in [
+        "top1_tansho", "top1_fukusho", "top3_fukusho",
+        "top2_umaren", "top2_umatan", "top3_sanrenpuku", "top3_sanrentan",
+        "value_bet",
+    ]:
         result = evaluator.simulate_return(
             valid_df, trainer.feature_columns, model, strategy=strategy
         )

@@ -130,6 +130,10 @@ class ModelEvaluator:
                 - 'top1_tansho': 予測1位の単勝を購入
                 - 'top1_fukusho': 予測1位の複勝を購入
                 - 'top3_fukusho': 予測Top3の複勝を購入
+                - 'top2_umaren': 予測Top2の馬連を購入
+                - 'top2_umatan': 予測Top2の馬単を購入（1位→2位）
+                - 'top3_sanrenpuku': 予測Top3の三連複を購入
+                - 'top3_sanrentan': 予測Top3の三連単を購入（1位→2位→3位）
                 - 'value_bet': 期待値ベースの購入
 
         Returns:
@@ -164,16 +168,20 @@ class ModelEvaluator:
             # レースキーの復元
             race_key_vals = dict(zip(RACE_KEY_COLS, group_key)) if isinstance(group_key, tuple) else {}
 
-            if strategy == "top1_tansho":
-                result = self._bet_top1_tansho(group, harai_data, race_key_vals)
-            elif strategy == "top1_fukusho":
-                result = self._bet_top1_fukusho(group, harai_data, race_key_vals)
-            elif strategy == "top3_fukusho":
-                result = self._bet_top3_fukusho(group, harai_data, race_key_vals)
-            elif strategy == "value_bet":
-                result = self._bet_value(group, harai_data, race_key_vals)
-            else:
+            strategy_map = {
+                "top1_tansho": self._bet_top1_tansho,
+                "top1_fukusho": self._bet_top1_fukusho,
+                "top3_fukusho": self._bet_top3_fukusho,
+                "top2_umaren": self._bet_top2_umaren,
+                "top2_umatan": self._bet_top2_umatan,
+                "top3_sanrenpuku": self._bet_top3_sanrenpuku,
+                "top3_sanrentan": self._bet_top3_sanrentan,
+                "value_bet": self._bet_value,
+            }
+            bet_func = strategy_map.get(strategy)
+            if bet_func is None:
                 continue
+            result = bet_func(group, harai_data, race_key_vals)
 
             total_bet += result["bet"]
             total_return += result["return"]
@@ -337,6 +345,174 @@ class ModelEvaluator:
     # 払戻データ
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # 組番フォーマット
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_kumi_umaren(uma1: str, uma2: str) -> str:
+        """馬連の組番を生成する（小さい番号が先）."""
+        a = ModelEvaluator._format_umaban(uma1)
+        b = ModelEvaluator._format_umaban(uma2)
+        if a > b:
+            a, b = b, a
+        return a + b
+
+    @staticmethod
+    def _make_kumi_umatan(uma1: str, uma2: str) -> str:
+        """馬単の組番を生成する（1着→2着の順）."""
+        a = ModelEvaluator._format_umaban(uma1)
+        b = ModelEvaluator._format_umaban(uma2)
+        return a + b
+
+    @staticmethod
+    def _make_kumi_sanren(uma1: str, uma2: str, uma3: str) -> str:
+        """三連複の組番を生成する（小さい順にソート）."""
+        nums = sorted([
+            ModelEvaluator._format_umaban(uma1),
+            ModelEvaluator._format_umaban(uma2),
+            ModelEvaluator._format_umaban(uma3),
+        ])
+        return "".join(nums)
+
+    @staticmethod
+    def _make_kumi_sanrentan(uma1: str, uma2: str, uma3: str) -> str:
+        """三連単の組番を生成する（1着→2着→3着の順）."""
+        a = ModelEvaluator._format_umaban(uma1)
+        b = ModelEvaluator._format_umaban(uma2)
+        c = ModelEvaluator._format_umaban(uma3)
+        return a + b + c
+
+    # ------------------------------------------------------------------
+    # 馬連・馬単・三連複・三連単 の賭け戦略
+    # ------------------------------------------------------------------
+
+    def _bet_top2_umaren(
+        self,
+        group: pd.DataFrame,
+        harai_data: dict,
+        race_key: dict[str, str],
+    ) -> dict[str, int]:
+        """予測上位2頭の馬連を購入する."""
+        if len(group) < 2:
+            return {"bet": 0, "return": 0, "bet_count": 0, "win_count": 0}
+
+        top2 = group.nlargest(2, "pred_prob")
+        if "post_umaban" not in top2.columns:
+            return {"bet": 0, "return": 0, "bet_count": 0, "win_count": 0}
+
+        uma_list = top2["post_umaban"].tolist()
+        kumi = self._make_kumi_umaren(uma_list[0], uma_list[1])
+
+        race_harai = harai_data.get(self._race_key_str(race_key), {})
+        umaren = race_harai.get("umaren", {})
+
+        payout = umaren.get(kumi, 0)
+        return {
+            "bet": 100,
+            "return": payout,
+            "bet_count": 1,
+            "win_count": 1 if payout > 0 else 0,
+        }
+
+    def _bet_top2_umatan(
+        self,
+        group: pd.DataFrame,
+        harai_data: dict,
+        race_key: dict[str, str],
+    ) -> dict[str, int]:
+        """予測上位2頭の馬単を購入する（1位→2位の順）."""
+        if len(group) < 2:
+            return {"bet": 0, "return": 0, "bet_count": 0, "win_count": 0}
+
+        top2 = group.nlargest(2, "pred_prob")
+        if "post_umaban" not in top2.columns:
+            return {"bet": 0, "return": 0, "bet_count": 0, "win_count": 0}
+
+        uma_list = top2["post_umaban"].tolist()
+        kumi = self._make_kumi_umatan(uma_list[0], uma_list[1])
+
+        race_harai = harai_data.get(self._race_key_str(race_key), {})
+        umatan = race_harai.get("umatan", {})
+
+        payout = umatan.get(kumi, 0)
+        return {
+            "bet": 100,
+            "return": payout,
+            "bet_count": 1,
+            "win_count": 1 if payout > 0 else 0,
+        }
+
+    def _bet_top3_sanrenpuku(
+        self,
+        group: pd.DataFrame,
+        harai_data: dict,
+        race_key: dict[str, str],
+    ) -> dict[str, int]:
+        """予測上位3頭の三連複を購入する."""
+        if len(group) < 3:
+            return {"bet": 0, "return": 0, "bet_count": 0, "win_count": 0}
+
+        top3 = group.nlargest(3, "pred_prob")
+        if "post_umaban" not in top3.columns:
+            return {"bet": 0, "return": 0, "bet_count": 0, "win_count": 0}
+
+        uma_list = top3["post_umaban"].tolist()
+        kumi = self._make_kumi_sanren(uma_list[0], uma_list[1], uma_list[2])
+
+        race_harai = harai_data.get(self._race_key_str(race_key), {})
+        sanren = race_harai.get("sanren", {})
+
+        payout = sanren.get(kumi, 0)
+        return {
+            "bet": 100,
+            "return": payout,
+            "bet_count": 1,
+            "win_count": 1 if payout > 0 else 0,
+        }
+
+    def _bet_top3_sanrentan(
+        self,
+        group: pd.DataFrame,
+        harai_data: dict,
+        race_key: dict[str, str],
+    ) -> dict[str, int]:
+        """予測上位3頭の三連単を購入する（1位→2位→3位の順）."""
+        if len(group) < 3:
+            return {"bet": 0, "return": 0, "bet_count": 0, "win_count": 0}
+
+        top3 = group.nlargest(3, "pred_prob")
+        if "post_umaban" not in top3.columns:
+            return {"bet": 0, "return": 0, "bet_count": 0, "win_count": 0}
+
+        uma_list = top3["post_umaban"].tolist()
+        kumi = self._make_kumi_sanrentan(uma_list[0], uma_list[1], uma_list[2])
+
+        race_harai = harai_data.get(self._race_key_str(race_key), {})
+        sanrentan = race_harai.get("sanrentan", {})
+
+        payout = sanrentan.get(kumi, 0)
+        return {
+            "bet": 100,
+            "return": payout,
+            "bet_count": 1,
+            "win_count": 1 if payout > 0 else 0,
+        }
+
+    # ------------------------------------------------------------------
+    # 払戻データ
+    # ------------------------------------------------------------------
+
+    # 賭式ごとの検出キーワード定義
+    _BET_TYPES: list[tuple[str, str]] = [
+        ("tansyo", "tansho"),
+        ("fukusyo", "fukusho"),
+        ("umaren", "umaren"),
+        ("umatan", "umatan"),
+        ("sanrentan", "sanrentan"),   # sanrentan を sanren より先に検出
+        ("sanren", "sanren"),
+    ]
+
     def _get_harai_data(
         self,
         df: pd.DataFrame,
@@ -344,7 +520,8 @@ class ModelEvaluator:
         """払戻データを取得する.
 
         n_harai テーブルのカラム名は EveryDB2 のバージョンにより異なる
-        可能性があるため、スキーマから動的に単勝/複勝カラムを検出する。
+        可能性があるため、スキーマから動的にカラムを検出する。
+        単勝/複勝/馬連/馬単/三連複/三連単に対応。
         """
         key_cols = [f"_key_{c}" for c in RACE_KEY_COLS if f"_key_{c}" in df.columns]
         if not key_cols:
@@ -359,25 +536,34 @@ class ModelEvaluator:
         schema_df = query_df("SELECT * FROM n_harai LIMIT 0")
         all_cols = schema_df.columns.tolist()
 
-        tansyo_pairs = self._find_pay_column_pairs(all_cols, "tansyo")
-        fukusyo_pairs = self._find_pay_column_pairs(all_cols, "fukusyo")
+        # 各賭式のカラムペアを検出
+        bet_pairs: dict[str, list[tuple[str, str]]] = {}
+        for col_key, result_key in self._BET_TYPES:
+            pairs = self._find_pay_column_pairs(all_cols, col_key)
+            bet_pairs[result_key] = pairs
 
-        if not tansyo_pairs and not fukusyo_pairs:
-            logger.warning("n_harai: 単勝/複勝払戻カラムが検出できません (columns=%s)", all_cols)
+        detected = {k: len(v) for k, v in bet_pairs.items() if v}
+        if not detected:
+            logger.warning("n_harai: 払戻カラムが検出できません (columns=%s)", all_cols)
             return {}
 
-        logger.info(
-            "n_harai カラム検出: 単勝 %d組, 複勝 %d組",
-            len(tansyo_pairs),
-            len(fukusyo_pairs),
-        )
+        logger.info("n_harai カラム検出: %s", detected)
 
         # Step 2: 必要なカラムだけ SELECT
         select_cols = list(RACE_KEY_COLS)
-        for u, p in tansyo_pairs + fukusyo_pairs:
-            select_cols.extend([u, p])
+        for pairs in bet_pairs.values():
+            for u, p in pairs:
+                select_cols.extend([u, p])
 
-        cols_str = ", ".join(select_cols)
+        # 重複除去して順序を保持
+        seen: set[str] = set()
+        unique_cols: list[str] = []
+        for c in select_cols:
+            if c not in seen:
+                seen.add(c)
+                unique_cols.append(c)
+
+        cols_str = ", ".join(unique_cols)
         sql = f"""
         SELECT {cols_str}
         FROM n_harai
@@ -393,21 +579,17 @@ class ModelEvaluator:
         for _, row in harai_df.iterrows():
             rk = "_".join(str(row.get(c, "")).strip() for c in RACE_KEY_COLS)
 
-            tansho: dict[str, int] = {}
-            for u_col, p_col in tansyo_pairs:
-                umaban = str(row.get(u_col, "")).strip()
-                pay = self._safe_pay(row.get(p_col))
-                if umaban and pay > 0:
-                    tansho[umaban] = pay
+            race_data: dict[str, dict[str, int]] = {}
+            for col_key, result_key in self._BET_TYPES:
+                pays: dict[str, int] = {}
+                for u_col, p_col in bet_pairs[result_key]:
+                    kumi_or_umaban = str(row.get(u_col, "")).strip()
+                    pay = self._safe_pay(row.get(p_col))
+                    if kumi_or_umaban and pay > 0:
+                        pays[kumi_or_umaban] = pay
+                race_data[result_key] = pays
 
-            fukusho: dict[str, int] = {}
-            for u_col, p_col in fukusyo_pairs:
-                umaban = str(row.get(u_col, "")).strip()
-                pay = self._safe_pay(row.get(p_col))
-                if umaban and pay > 0:
-                    fukusho[umaban] = pay
-
-            result[rk] = {"tansho": tansho, "fukusho": fukusho}
+            result[rk] = race_data
 
         return result
 
@@ -424,19 +606,26 @@ class ModelEvaluator:
         all_cols: list[str],
         bet_type: str,
     ) -> list[tuple[str, str]]:
-        """馬番カラムと払戻金カラムのペアを検出する.
+        """馬番/組番カラムと払戻金カラムのペアを検出する.
 
-        カラム名の命名規則に依存せず、'umaban' を含むカラムを基準に
-        対応する 'pay' カラムを推定する。
+        単勝/複勝は 'umaban' を含むカラム、馬連/馬単/三連複/三連単は
+        'umaban' または 'kumi' を含むカラムを基準に検出する。
+
+        なお sanrentan を先に検出してから sanren を検出する必要がある
+        （sanren は sanrentan にも部分一致するため、呼び出し順で制御）。
         """
-        umaban_cols = sorted(
-            c for c in all_cols if bet_type in c and "umaban" in c
+        # umaban ベース（単勝/複勝、および EveryDB2 の馬連等も umaban 表記の場合）
+        id_cols = sorted(
+            c for c in all_cols if bet_type in c and ("umaban" in c or "kumi" in c)
         )
         pairs: list[tuple[str, str]] = []
-        for u_col in umaban_cols:
-            p_col = u_col.replace("umaban", "pay")
-            if p_col in all_cols:
-                pairs.append((u_col, p_col))
+        for id_col in id_cols:
+            # sanren と sanrentan の誤マッチ防止
+            if bet_type == "sanren" and "sanrentan" in id_col:
+                continue
+            p_col = id_col.replace("umaban", "pay").replace("kumi", "pay")
+            if p_col in all_cols and p_col != id_col:
+                pairs.append((id_col, p_col))
         return pairs
 
     @staticmethod
