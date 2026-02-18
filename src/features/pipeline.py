@@ -32,6 +32,7 @@ from src.features.training import TrainingFeatureExtractor
 from src.features.bloodline import BloodlineFeatureExtractor
 from src.features.odds import OddsFeatureExtractor
 from src.utils.code_master import track_type, distance_category
+from src.utils.base_time import get_or_build_base_time
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +236,13 @@ class FeaturePipeline:
             "年度別特徴量構築: %s〜%s (%d年分, workers=%d)",
             year_start, year_end, len(years), workers,
         )
+
+        if workers >= 2:
+            # 並列実行前に基準タイムテーブルをメインプロセスで構築しておく。
+            # 各ワーカーが同時に build_base_time_table() を呼ぶと
+            # 同一CSVへの同時書き込みでファイル破損するレースコンディションを防止。
+            logger.info("基準タイムテーブルを事前構築します（並列実行の準備）...")
+            get_or_build_base_time()
 
         if workers <= 1:
             # 直列実行
