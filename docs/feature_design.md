@@ -448,24 +448,24 @@ WHERE u.ketto3infohanNum1 = :father_hansyoku_num  -- 同じ父
 競馬は相対的な競争であり、同レース出走馬の中での相対的な位置付けが重要。
 各馬の主要能力指標について、レース内でのZスコア（標準化偏差値）とランク（順位）を算出する。
 
-**対象特徴量と方向性:**
+**対象特徴量と方向性・欠損タイプ:**
 
-| 元特徴量 | ascending | 説明 |
-|---------|-----------|------|
-| speed_index_avg_last3 | False | 高い方が良い |
-| speed_index_last | False | 高い方が良い |
-| speed_l3f_avg_last3 | True | 小さい（速い）方が良い |
-| speed_l3f_best_last5 | True | 小さい方が良い |
-| horse_fukusho_rate | False | 高い方が良い |
-| horse_fukusho_rate_last5 | False | 高い方が良い |
-| horse_avg_jyuni_last3 | True | 小さい（着順が良い）方が良い |
-| horse_win_rate | False | 高い方が良い |
-| jockey_win_rate_year | False | 高い方が良い |
-| jockey_fukusho_rate_year | False | 高い方が良い |
-| trainer_win_rate_year | False | 高い方が良い |
-| training_hanro_time4 | True | 小さい（速い）方が良い |
-| blood_father_turf_rate | False | 高い方が良い |
-| blood_father_dirt_rate | False | 高い方が良い |
+| 元特徴量 | ascending | missing_type | 説明 |
+|---------|-----------|-------------|------|
+| speed_index_avg_last3 | False | numeric | 高い方が良い |
+| speed_index_last | False | numeric | 高い方が良い |
+| speed_l3f_avg_last3 | True | numeric | 小さい（速い）方が良い |
+| speed_l3f_best_last5 | True | numeric | 小さい方が良い |
+| horse_fukusho_rate | False | rate | 高い方が良い（0.0=複勝率0%は有効値） |
+| horse_fukusho_rate_last5 | False | rate | 高い方が良い（0.0は有効値） |
+| horse_avg_jyuni_last3 | True | numeric | 小さい（着順が良い）方が良い |
+| horse_win_rate | False | rate | 高い方が良い（0.0=勝率0%は有効値） |
+| jockey_win_rate_year | False | rate | 高い方が良い（0.0は有効値） |
+| jockey_fukusho_rate_year | False | rate | 高い方が良い（0.0は有効値） |
+| trainer_win_rate_year | False | rate | 高い方が良い（0.0は有効値） |
+| training_hanro_time4 | True | numeric | 小さい（速い）方が良い |
+| blood_father_turf_rate | False | blood | 高い方が良い（0.0=データ不足は欠損扱い） |
+| blood_father_dirt_rate | False | blood | 高い方が良い（0.0=データ不足は欠損扱い） |
 
 **生成される特徴量（14ターゲット × 2 = 28個）:**
 
@@ -503,9 +503,19 @@ WHERE u.ketto3infohanNum1 = :father_hansyoku_num  -- 同じ父
 **算出ロジック:**
 
 ```python
+# _RELATIVE_TARGETS は3タプル: (feat_name, ascending, missing_type)
+# missing_type で欠損値の扱いを特徴量ごとに制御する
+
+col = result[feat_name].replace(MISSING_NUMERIC, np.nan)  # -1 → NaN（全型共通）
+
+# missing_type別の追加処理
+# "numeric": 追加処理なし（0.0は有効値）
+# "rate":    追加処理なし（0.0は「勝率0%」等の正当な値）
+# "blood":   MISSING_RATE(0.0) → NaN（データ不足による0.0は欠損扱い）
+if missing_type == "blood":
+    col = col.replace(MISSING_RATE, np.nan)
+
 # Zスコア: (値 - レース内平均) / レース内標準偏差
-# 欠損値（MISSING_NUMERIC=-1, MISSING_RATE=0）はNaN扱い
-col = result[feat_name].replace(MISSING_NUMERIC, np.nan)
 race_mean = col.mean()
 race_std = col.std()
 zscore = (col - race_mean) / race_std  # std==0の場合は全馬0.0
@@ -514,6 +524,18 @@ zscore = (col - race_mean) / race_std  # std==0の場合は全馬0.0
 # 欠損値は最下位扱い（na_option="bottom"）
 rank = col.rank(ascending=ascending, method="min", na_option="bottom")
 ```
+
+**missing_type の分類根拠:**
+
+| missing_type | 0.0の意味 | 対象特徴量例 |
+|-------------|----------|------------|
+| `numeric` | 有効な数値（タイム0秒はないが安全側） | speed_index_*, horse_avg_jyuni_*, training_hanro_* |
+| `rate` | 「勝率0%」「複勝率0%」= 正当な値 | horse_fukusho_rate, horse_win_rate, jockey_win_rate_year 等 |
+| `blood` | データ不足による0.0 = 欠損 | blood_father_turf_rate, blood_father_dirt_rate |
+
+**重要:** rate系特徴量で0.0をNaN化すると、弱い馬（勝率0%）のZスコアが0.0（平均）になり、
+本来マイナスであるべき相対評価が失われる。これは回収率5%低下、的中率0.3%低下の原因となった
+実績があるため、missing_typeの設定は慎重に行うこと。
 
 **設計根拠:**
 LightGBMは分岐でのthreshold比較なので、絶対値では「同レースのライバルより上か下か」が判断しにくい。

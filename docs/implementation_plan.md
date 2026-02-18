@@ -596,12 +596,12 @@ PostgreSQLへの接続はsrc/db.pyのquery_dfを使ってください。
 
 | # | 提案 | 状況 | 実装箇所 | 備考 |
 |---|------|------|---------|------|
-| 1 | レース内相対特徴量 | ✅ 完了 | pipeline.py `_add_relative_features()` | 14指標×2(zscore/rank)=28特徴量 |
+| 1 | レース内相対特徴量 | ✅ 完了 | pipeline.py `_add_relative_features()` | 14指標×2(zscore/rank)=28特徴量。missing_type 3パターン方式でMISSING_RATE=0.0の誤NaN化バグを修正済み |
 | 2-17 | その他 | 🔲 未着手 | — | `docs/new_feature.md` 参照 |
 
 ### テスト状況
 
-- pytest: 28テスト全パス（相対特徴量テスト5件追加）
+- pytest: 30テスト全パス（相対特徴量テスト5件 + MISSING_RATEバグ修正テスト2件追加）
 - 構文チェック: 全25 Pythonファイル問題なし
 - 特徴量数: 158（オッズ7含む、重複なし確認済み）
 
@@ -638,3 +638,9 @@ PostgreSQLへの接続はsrc/db.pyのquery_dfを使ってください。
 
 **原因:** `build_dataset()` が全年度を直列処理していた
 **解決:** 年度別に parquet を分割保存し、`ProcessPoolExecutor` で並列構築する方式に変更。`--workers N` で並列度を指定可能。既存 parquet がある年度は `--force-rebuild` なしならスキップされるため、差分再構築も高速
+
+### 7. レース内相対特徴量追加後に性能低下（回収率-5%、的中率-0.3%）
+
+**原因:** `_add_relative_features()` で全特徴量に対し `MISSING_RATE`(0.0) を一律NaN化していた。rate系特徴量（`horse_fukusho_rate`, `horse_win_rate`, `jockey_win_rate_year` 等）では0.0は「勝率0%」を意味する正当な値だが、これがNaN→Zスコア0.0（平均）に変換され、弱い馬が平均並みの評価を受ける上方バイアスが発生
+**解決:** `_RELATIVE_TARGETS` を2タプルから3タプル `(feat_name, ascending, missing_type)` に拡張。`missing_type` で3パターン（"numeric"/"rate"/"blood"）を定義し、rate系では0.0を有効値として保持、blood系のみ0.0をNaN化する方式に変更。テスト2件追加（`test_add_relative_features_rate_zero_is_valid`, `test_add_relative_features_blood_zero_is_missing`）
+**教訓:** 欠損値のセンチネル値（特に0.0）は特徴量のドメインによって意味が異なる。一律の欠損値処理は危険であり、特徴量ごとの意味論を考慮した処理が必要。新しい相対特徴量を追加する際は必ず `missing_type` を適切に設定すること

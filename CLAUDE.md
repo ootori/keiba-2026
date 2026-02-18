@@ -59,7 +59,7 @@ everydb2/
 ├── models/                           # 学習済みモデル保存先（*.txt, *_features.txt）
 ├── data/                             # 中間データキャッシュ（*.parquet, base_time_table.csv）
 └── tests/
-    └── test_features.py              # 23テスト（pytest）
+    └── test_features.py              # 30テスト（pytest）
 ```
 
 ## データベース接続
@@ -264,6 +264,7 @@ data/
 - **組番フォーマット（馬連/馬単/三連複/三連単）:** n_haraiの組番は2桁ゼロ埋め馬番の連結（馬連/馬単: 4桁 "0102"、三連複/三連単: 6桁 "010203"）。馬連・三連複はソート済み（小さい番号が先）、馬単・三連単は着順通り
 - **特徴量の train/valid 不整合防止:** `trainer.py` では train_df と valid_df の両方に存在するカラムのみを特徴量として使用する。parquet の再構築タイミング差でカラム不整合が起きた場合はWARNINGログで通知。全特徴量を使いたい場合は `--force-rebuild` で全年度を再構築すること
 - **レース内相対特徴量のparquet依存:** 相対特徴量（`rel_*`）は `pipeline.py` の `_add_relative_features()` で構築時に計算される。既存 parquet には含まれないため、この特徴量を使うには対象年度の parquet を `--force-rebuild` で再構築する必要がある
+- **MISSING_RATE=0.0 の特徴量ごとの意味の違い:** `_add_relative_features()` では `missing_type` パラメータで欠損値処理を3パターンに分類している。rate系特徴量（勝率・複勝率等）では0.0は「0%」という正当な値であり、NaN化すると弱い馬のZスコアが平均に引き上げられ性能が低下する。新しい相対特徴量を追加する際は `missing_type` を必ず適切に設定すること（"numeric"/"rate"/"blood"）
 
 ## 回収率シミュレーション戦略
 

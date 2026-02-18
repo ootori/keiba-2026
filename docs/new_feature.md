@@ -92,9 +92,30 @@ Zスコアやランク特徴量を入れることで、相対的な実力差が�
 - **実装箇所:** `src/features/pipeline.py` の `_add_relative_features()` メソッド
 - **相対化対象:** 14特徴量 × 2（Zスコア + ランク）= 28特徴量を追加
 - **提案からの変更点:** 提案では `relative_features` リストを `_add_cross_features` 内に直接記述するコード例だったが、メンテナンス性を考慮してクラス変数 `_RELATIVE_TARGETS` にターゲット特徴量と方向性（ascending）を定義する方式に変更
-- **欠損値処理:** `MISSING_NUMERIC`(-1) と `MISSING_RATE`(0) を NaN として扱い、Zスコアは0.0、ランクは最下位で埋める
-- **テスト:** `tests/test_features.py` に5件のテストを追加（Zスコア計算、ランク計算、欠損カラム、欠損値処理）
+- **欠損値処理（missing_type 3パターン方式）:**
+  - `_RELATIVE_TARGETS` は3タプル `(feat_name, ascending, missing_type)` で定義
+  - `missing_type="numeric"`: `MISSING_NUMERIC`(-1) のみNaN化。0.0は有効値として保持
+  - `missing_type="rate"`: `MISSING_NUMERIC`(-1) のみNaN化。0.0は「勝率0%」等の正当な値なので保持
+  - `missing_type="blood"`: `MISSING_NUMERIC`(-1) と `MISSING_RATE`(0.0) の両方をNaN化。血統適性はデータ不足時に0.0が設定されるため
+  - Zスコアは0.0、ランクは最下位で埋める
+- **テスト:** `tests/test_features.py` に7件のテストを追加（Zスコア計算、ランク計算、欠損カラム、欠損値処理、rate型0.0保持、blood型0.0除外）
 - **注意:** parquet を再構築しないと新特徴量が含まれない。`--force-rebuild` で全年度を再構築すること
+
+### バグ修正ノート: MISSING_RATE=0.0 の誤NaN化（2026-02-18）
+
+**問題:** 初期実装では全特徴量に対して `MISSING_NUMERIC`(-1) と `MISSING_RATE`(0.0) の両方をNaNに変換していた。
+しかし、rate系特徴量（`horse_fukusho_rate`, `horse_win_rate`, `jockey_win_rate_year` 等）では
+0.0は「勝率0%」「複勝率0%」を意味する正当な値である。これをNaN化すると、弱い馬のZスコアが
+0.0（平均）になってしまい、本来マイナスであるべき相対評価が失われた。
+
+**影響:** モデル性能が低下（回収率-5%、的中率-0.3%）。弱い馬が平均並みの評価を受けることで、
+予測精度が全体的に悪化していた。
+
+**修正:** 特徴量ごとに欠損値の意味が異なることを認識し、`missing_type` パラメータで3パターンに分類。
+rate系では0.0を有効値として保持し、blood系のみ0.0をNaN化する方式に変更。
+
+**教訓:** 欠損値のセンチネル値（特に0.0）が特徴量のドメインによって意味が異なるケースでは、
+一律の欠損値処理は危険。特徴量ごとの意味論を考慮した処理が必要。
 
 ---
 
