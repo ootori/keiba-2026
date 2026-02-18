@@ -20,7 +20,7 @@
 | 5 | 特徴量追加 | 票数（投票比率）ベースの特徴量 | ★★★★ | 中 | 🔲 未着手 |
 | 6 | 特徴量追加 | 時系列オッズの変動特徴量 | ★★★ | 中 | 🔲 未着手 |
 | 7 | 特徴量追加 | 馬主・生産者の成績特徴量 | ★★★ | 低 | 🔲 未着手 |
-| 8 | 特徴量改善 | 血統特徴量の強化（母系、ニックス） | ★★★ | 中 | 🔲 未着手 |
+| 8 | 特徴量改善 | 血統特徴量の強化（母系、ニックス） | ★★★ | 中 | ✅ 実装済 |
 | 9 | 特徴量追加 | コース区分（A/B/C/D）の活用 | ★★★ | 低 | 🔲 未着手 |
 | 10 | 特徴量追加 | 競走馬セール価格 | ★★ | 低 | 🔲 未着手 |
 | 11 | 特徴量改善 | 調教特徴量の強化 | ★★★ | 中 | 🔲 未着手 |
@@ -411,6 +411,23 @@ WHERE ur.datakubun = '7' AND ur.ijyocd = '0'
   AND (ur.year || ur.monthday) < %(race_date)s
 GROUP BY s1.fnum, s2.fnum
 ```
+
+### 実装ノート（2026-02-18 実装済み）
+
+- **実装箇所:** `src/features/bloodline.py` を大幅拡張（既存10特徴量 + 新規8特徴量 = 合計18特徴量）
+- **変更ファイル:**
+  - `src/features/bloodline.py`: 新規特徴量8個の追加、`_get_race_info()` の拡張、`_check_inbreeding()` の世代判定追加、`_get_nicks_stats()` / `_get_sire_baba_stats()` / `_get_sire_jyo_stats()` / `_get_mother_produce_stats()` の新規メソッド追加
+  - `src/config.py`: `CATEGORICAL_FEATURES` に `blood_mother_id`, `blood_mother_keito` を追加
+  - `src/features/pipeline.py`: `_RELATIVE_TARGETS` に `blood_nicks_rate`, `blood_father_baba_rate`, `blood_father_jyo_rate`, `blood_mother_produce_rate` を追加（blood型欠損値処理）
+  - `tests/test_features.py`: 近親交配世代判定テスト4件、相対特徴量テスト2件を追加
+  - `docs/feature_design.md`: 特徴量一覧に新規8特徴量を追加
+- **提案からの変更点:**
+  - ニックスの集計期間を5年に設定（3年では父×母父の組み合わせのサンプル数が不足しがちなため）
+  - 母産駒成績の集計期間を10年に設定（兄弟姉妹の走歴が長期に渡るため）
+  - 母産駒成績は当該馬自身を除外して計算（自身の成績が含まれるとデータリークに近い効果が出るため）
+  - 近親交配世代は `_check_inbreeding()` 静的メソッドとして分離し、テスト可能な設計に
+- **相対特徴量（レース内Zスコア・ランク）:** 新規4特徴量（nicks_rate, father_baba_rate, father_jyo_rate, mother_produce_rate）は blood 型欠損値処理で 0.0=データなしとして NaN 化
+- **注意:** parquet を再構築しないと新特徴量が含まれない。`--force-rebuild` で全年度を再構築すること
 
 ---
 

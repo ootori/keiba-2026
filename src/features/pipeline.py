@@ -495,6 +495,10 @@ class FeaturePipeline:
         ("training_hanro_time4", True, "numeric"),       # 坂路4Fタイム → 小さい方が良い
         ("blood_father_turf_rate", False, "blood"),      # 父産駒芝複勝率（0.0=データなし）
         ("blood_father_dirt_rate", False, "blood"),      # 父産駒ダート複勝率
+        ("blood_nicks_rate", False, "blood"),             # ニックス複勝率（0.0=データなし）
+        ("blood_father_baba_rate", False, "blood"),       # 父産駒馬場状態別複勝率
+        ("blood_father_jyo_rate", False, "blood"),        # 父産駒競馬場別複勝率
+        ("blood_mother_produce_rate", False, "blood"),    # 母産駒複勝率（0.0=データなし）
     ]
 
     @staticmethod

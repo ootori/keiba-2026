@@ -67,6 +67,8 @@ CATEGORICAL_FEATURES: list[str] = [
     "blood_bms_id",
     "blood_father_keito",
     "blood_bms_keito",
+    "blood_mother_id",
+    "blood_mother_keito",
     "interval_category",
     "cross_dist_category_change",
 ]

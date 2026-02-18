@@ -339,8 +339,9 @@ class TestFeaturePipeline:
         from src.features.pipeline import FeaturePipeline
 
         names = FeaturePipeline._relative_feature_names()
-        # 14ターゲット × 2（zscore + rank） = 28
-        assert len(names) == 28
+        # 18ターゲット × 2（zscore + rank） = 36
+        # (既存14 + 新規血統4: nicks_rate, father_baba_rate, father_jyo_rate, mother_produce_rate)
+        assert len(names) == 36
         assert "rel_speed_index_avg_last3_zscore" in names
         assert "rel_speed_index_avg_last3_rank" in names
         assert "rel_horse_fukusho_rate_zscore" in names
@@ -487,6 +488,128 @@ class TestFeaturePipeline:
 # ============================================================
 
 
+class TestBloodlineFeatureExtractor:
+    """血統特徴量のテスト."""
+
+    def test_feature_names_count(self) -> None:
+        from src.features.bloodline import BloodlineFeatureExtractor
+
+        ext = BloodlineFeatureExtractor()
+        # 既存10 + 新規8 = 18
+        assert len(ext.feature_names) == 18
+
+    def test_check_inbreeding_no_inbreed(self) -> None:
+        """近親交配なしの場合 (0, 0) を返す."""
+        from src.features.bloodline import BloodlineFeatureExtractor
+
+        row = pd.Series({
+            "fnum": "0000000001", "mnum": "0000000002",
+            "ffnum": "0000000003", "fmnum": "0000000004",
+            "mfnum": "0000000005", "mmnum": "0000000006",
+            "fffnum": "0000000007", "ffmnum": "0000000008",
+            "fmfnum": "0000000009", "fmmnum": "0000000010",
+            "mffnum": "0000000011", "mfmnum": "0000000012",
+            "mmfnum": "0000000013", "mmmnum": "0000000014",
+        })
+        flag, gen = BloodlineFeatureExtractor._check_inbreeding(row)
+        assert flag == 0
+        assert gen == 0
+
+    def test_check_inbreeding_gen2(self) -> None:
+        """2代での近親交配を検出する."""
+        from src.features.bloodline import BloodlineFeatureExtractor
+
+        # ffnum と mfnum が同一 → gen1+gen2 の範囲で重複 → gen=2
+        row = pd.Series({
+            "fnum": "0000000001", "mnum": "0000000002",
+            "ffnum": "0000000099", "fmnum": "0000000004",
+            "mfnum": "0000000099", "mmnum": "0000000006",
+            "fffnum": "0000000007", "ffmnum": "0000000008",
+            "fmfnum": "0000000009", "fmmnum": "0000000010",
+            "mffnum": "0000000011", "mfmnum": "0000000012",
+            "mmfnum": "0000000013", "mmmnum": "0000000014",
+        })
+        flag, gen = BloodlineFeatureExtractor._check_inbreeding(row)
+        assert flag == 1
+        assert gen == 2
+
+    def test_check_inbreeding_gen3(self) -> None:
+        """3代での近親交配を検出する."""
+        from src.features.bloodline import BloodlineFeatureExtractor
+
+        # fffnum と mffnum が同一 → gen3 で重複 → gen=3
+        row = pd.Series({
+            "fnum": "0000000001", "mnum": "0000000002",
+            "ffnum": "0000000003", "fmnum": "0000000004",
+            "mfnum": "0000000005", "mmnum": "0000000006",
+            "fffnum": "0000000099", "ffmnum": "0000000008",
+            "fmfnum": "0000000009", "fmmnum": "0000000010",
+            "mffnum": "0000000099", "mfmnum": "0000000012",
+            "mmfnum": "0000000013", "mmmnum": "0000000014",
+        })
+        flag, gen = BloodlineFeatureExtractor._check_inbreeding(row)
+        assert flag == 1
+        assert gen == 3
+
+    def test_check_inbreeding_empty_ancestors(self) -> None:
+        """空の祖先番号は無視される."""
+        from src.features.bloodline import BloodlineFeatureExtractor
+
+        row = pd.Series({
+            "fnum": "0000000001", "mnum": "0000000002",
+            "ffnum": "", "fmnum": "0000000000",
+            "mfnum": "0000000005", "mmnum": "0000000006",
+            "fffnum": "", "ffmnum": "",
+            "fmfnum": "", "fmmnum": "",
+            "mffnum": "", "mfmnum": "",
+            "mmfnum": "", "mmmnum": "",
+        })
+        flag, gen = BloodlineFeatureExtractor._check_inbreeding(row)
+        assert flag == 0
+        assert gen == 0
+
+
+class TestBloodlineRelativeFeatures:
+    """血統系新規特徴量の相対特徴量テスト."""
+
+    def test_nicks_rate_relative(self) -> None:
+        """blood_nicks_rate が相対特徴量の対象として blood 型で処理される."""
+        from src.features.pipeline import FeaturePipeline
+
+        pipeline = FeaturePipeline(include_odds=False)
+
+        df = pd.DataFrame(
+            {
+                "blood_nicks_rate": [0.3, 0.0, 0.2],  # 0.0 = データなし
+            },
+            index=["horse_a", "horse_b", "horse_c"],
+        )
+
+        result = pipeline._add_relative_features(df)
+
+        # blood 型なので 0.0 は NaN 扱い → Zスコアは 0.0 で埋まる
+        assert result.loc["horse_b", "rel_blood_nicks_rate_zscore"] == 0.0
+
+    def test_mother_produce_rate_relative(self) -> None:
+        """blood_mother_produce_rate が相対特徴量の対象として機能する."""
+        from src.features.pipeline import FeaturePipeline
+
+        pipeline = FeaturePipeline(include_odds=False)
+
+        df = pd.DataFrame(
+            {
+                "blood_mother_produce_rate": [0.4, 0.2, 0.0],
+            },
+            index=["horse_a", "horse_b", "horse_c"],
+        )
+
+        result = pipeline._add_relative_features(df)
+        assert "rel_blood_mother_produce_rate_zscore" in result.columns
+        assert "rel_blood_mother_produce_rate_rank" in result.columns
+        # 0.0 は blood 型なので NaN 扱い
+        assert result.loc["horse_c", "rel_blood_mother_produce_rate_zscore"] == 0.0
+
+
 class TestTotalFeatureCount:
     """全特徴量の合計数を確認する."""
 
@@ -496,9 +619,10 @@ class TestTotalFeatureCount:
         pipeline = FeaturePipeline(include_odds=True)
         names = pipeline.feature_names
 
-        # 基本約119 + クロス8 + 相対28 = 約155特徴量
-        assert len(names) >= 140, f"特徴量が少なすぎます: {len(names)}"
-        assert len(names) <= 180, f"特徴量が多すぎます: {len(names)}"
+        # 基本約127 + クロス8 + 相対36 = 約171特徴量
+        # (血統新規8特徴量 + 相対4新規×2=8追加)
+        assert len(names) >= 150, f"特徴量が少なすぎます: {len(names)}"
+        assert len(names) <= 200, f"特徴量が多すぎます: {len(names)}"
 
         # 重複がないこと
         assert len(names) == len(set(names)), (
