@@ -62,9 +62,26 @@ class ModelTrainer:
         exclude_cols = {target_col, "kettonum"} | {
             c for c in train_df.columns if c.startswith("_key_")
         }
+        # train と valid の両方に存在するカラムのみを使用
+        # （parquet の再構築タイミング差による不整合を防止）
+        common_cols = set(train_df.columns) & set(valid_df.columns)
         self.feature_columns = [
-            c for c in train_df.columns if c not in exclude_cols
+            c for c in train_df.columns
+            if c not in exclude_cols and c in common_cols
         ]
+
+        # 不整合がある場合は警告
+        train_only = set(train_df.columns) - set(valid_df.columns) - exclude_cols
+        valid_only = set(valid_df.columns) - set(train_df.columns) - exclude_cols
+        if train_only:
+            logger.warning(
+                "学習データのみに存在する特徴量（除外）: %s", sorted(train_only)
+            )
+        if valid_only:
+            logger.warning(
+                "検証データのみに存在する特徴量（除外）: %s", sorted(valid_only)
+            )
+
 
         logger.info("特徴量数: %d", len(self.feature_columns))
         logger.info("学習データ: %d行", len(train_df))

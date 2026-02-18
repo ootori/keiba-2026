@@ -335,6 +335,101 @@ class TestFeaturePipeline:
         assert "cross_dist_change" in names
         assert "cross_track_change" in names
 
+    def test_relative_feature_names(self) -> None:
+        from src.features.pipeline import FeaturePipeline
+
+        names = FeaturePipeline._relative_feature_names()
+        # 14ターゲット × 2（zscore + rank） = 28
+        assert len(names) == 28
+        assert "rel_speed_index_avg_last3_zscore" in names
+        assert "rel_speed_index_avg_last3_rank" in names
+        assert "rel_horse_fukusho_rate_zscore" in names
+        assert "rel_jockey_win_rate_year_rank" in names
+
+    def test_add_relative_features_zscore(self) -> None:
+        """Zスコアが正しく計算されることを確認する."""
+        from src.features.pipeline import FeaturePipeline
+
+        pipeline = FeaturePipeline(include_odds=False)
+
+        # 3頭のテストデータ（スピード指数: 100, 90, 80 → 平均90, 標準偏差10）
+        df = pd.DataFrame(
+            {
+                "speed_index_avg_last3": [100.0, 90.0, 80.0],
+                "horse_fukusho_rate": [0.5, 0.3, 0.1],
+            },
+            index=["horse_a", "horse_b", "horse_c"],
+        )
+
+        result = pipeline._add_relative_features(df)
+
+        # Zスコアの検証（speed_index_avg_last3: mean=90, std=10）
+        assert "rel_speed_index_avg_last3_zscore" in result.columns
+        assert result.loc["horse_a", "rel_speed_index_avg_last3_zscore"] == pytest.approx(1.0, abs=0.01)
+        assert result.loc["horse_b", "rel_speed_index_avg_last3_zscore"] == pytest.approx(0.0, abs=0.01)
+        assert result.loc["horse_c", "rel_speed_index_avg_last3_zscore"] == pytest.approx(-1.0, abs=0.01)
+
+    def test_add_relative_features_rank(self) -> None:
+        """ランクが正しく計算されることを確認する."""
+        from src.features.pipeline import FeaturePipeline
+
+        pipeline = FeaturePipeline(include_odds=False)
+
+        df = pd.DataFrame(
+            {
+                "speed_index_avg_last3": [100.0, 90.0, 80.0],
+                "horse_avg_jyuni_last3": [3.0, 5.0, 2.0],  # 着順は小さい方が良い
+            },
+            index=["horse_a", "horse_b", "horse_c"],
+        )
+
+        result = pipeline._add_relative_features(df)
+
+        # speed_index: ascending=False → 100が1位
+        assert result.loc["horse_a", "rel_speed_index_avg_last3_rank"] == 1.0
+        assert result.loc["horse_c", "rel_speed_index_avg_last3_rank"] == 3.0
+
+        # avg_jyuni: ascending=True → 2.0が1位
+        assert result.loc["horse_c", "rel_horse_avg_jyuni_last3_rank"] == 1.0
+        assert result.loc["horse_b", "rel_horse_avg_jyuni_last3_rank"] == 3.0
+
+    def test_add_relative_features_missing_column(self) -> None:
+        """存在しない特徴量カラムはデフォルト値で埋められることを確認する."""
+        from src.features.pipeline import FeaturePipeline
+
+        pipeline = FeaturePipeline(include_odds=False)
+
+        # speed_index_avg_last3 がない DataFrame
+        df = pd.DataFrame(
+            {"horse_fukusho_rate": [0.5, 0.3]},
+            index=["horse_a", "horse_b"],
+        )
+
+        result = pipeline._add_relative_features(df)
+        assert result.loc["horse_a", "rel_speed_index_avg_last3_zscore"] == 0.0
+        assert result.loc["horse_a", "rel_speed_index_avg_last3_rank"] == 0.0
+
+    def test_add_relative_features_with_missing_values(self) -> None:
+        """MISSING_NUMERIC値が正しくNaNとして扱われることを確認する."""
+        from src.features.pipeline import FeaturePipeline
+
+        pipeline = FeaturePipeline(include_odds=False)
+
+        df = pd.DataFrame(
+            {
+                "speed_index_avg_last3": [100.0, -1.0, 80.0],  # -1.0 = MISSING_NUMERIC
+            },
+            index=["horse_a", "horse_b", "horse_c"],
+        )
+
+        result = pipeline._add_relative_features(df)
+
+        # MISSING_NUMERIC の馬はZスコアが0に埋められる
+        assert result.loc["horse_b", "rel_speed_index_avg_last3_zscore"] == 0.0
+        # 有効な2頭（100, 80）で mean=90, std=~14.14
+        assert result.loc["horse_a", "rel_speed_index_avg_last3_zscore"] > 0
+        assert result.loc["horse_c", "rel_speed_index_avg_last3_zscore"] < 0
+
 
 # ============================================================
 # 合計特徴量数の確認
@@ -350,9 +445,9 @@ class TestTotalFeatureCount:
         pipeline = FeaturePipeline(include_odds=True)
         names = pipeline.feature_names
 
-        # CLAUDE.mdでは約130特徴量
-        assert len(names) >= 120, f"特徴量が少なすぎます: {len(names)}"
-        assert len(names) <= 150, f"特徴量が多すぎます: {len(names)}"
+        # 基本約119 + クロス8 + 相対28 = 約155特徴量
+        assert len(names) >= 140, f"特徴量が少なすぎます: {len(names)}"
+        assert len(names) <= 180, f"特徴量が多すぎます: {len(names)}"
 
         # 重複がないこと
         assert len(names) == len(set(names)), (

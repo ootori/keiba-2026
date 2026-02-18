@@ -111,6 +111,8 @@ class FeaturePipeline:
             names.extend(ext.feature_names)
         # クロス特徴量
         names.extend(self._cross_feature_names())
+        # レース内相対特徴量
+        names.extend(self._relative_feature_names())
         return names
 
     # ------------------------------------------------------------------
@@ -163,6 +165,9 @@ class FeaturePipeline:
 
         # クロス特徴量を追加
         result = self._add_cross_features(result, race_key)
+
+        # レース内相対特徴量を追加
+        result = self._add_relative_features(result)
 
         return result
 
@@ -435,6 +440,82 @@ class FeaturePipeline:
         if df.empty:
             return pd.Series(dtype=int)
         return df.set_index("kettonum")["target"]
+
+    # ------------------------------------------------------------------
+    # レース内相対特徴量（カテゴリ17）
+    # ------------------------------------------------------------------
+
+    # 相対化する特徴量の定義
+    # (元の特徴量名, ascending) — ascending=True: 値が小さいほどランク上位
+    _RELATIVE_TARGETS: list[tuple[str, bool]] = [
+        ("speed_index_avg_last3", False),      # スピード指数 → 高い方が良い
+        ("speed_index_last", False),            # 直近スピード指数
+        ("speed_l3f_avg_last3", True),          # 上がり3F平均 → 小さい方が良い
+        ("speed_l3f_best_last5", True),         # 上がり3Fベスト
+        ("horse_fukusho_rate", False),          # 複勝率
+        ("horse_fukusho_rate_last5", False),    # 直近5走複勝率
+        ("horse_avg_jyuni_last3", True),        # 直近3走平均着順 → 小さい方が良い
+        ("horse_win_rate", False),              # 勝率
+        ("jockey_win_rate_year", False),        # 騎手勝率
+        ("jockey_fukusho_rate_year", False),    # 騎手複勝率
+        ("trainer_win_rate_year", False),       # 調教師勝率
+        ("training_hanro_time4", True),         # 坂路4Fタイム → 小さい方が良い
+        ("blood_father_turf_rate", False),      # 父産駒芝複勝率
+        ("blood_father_dirt_rate", False),      # 父産駒ダート複勝率
+    ]
+
+    @staticmethod
+    def _relative_feature_names() -> list[str]:
+        """相対特徴量名のリストを返す."""
+        names: list[str] = []
+        for feat_name, _ in FeaturePipeline._RELATIVE_TARGETS:
+            names.append(f"rel_{feat_name}_zscore")
+            names.append(f"rel_{feat_name}_rank")
+        return names
+
+    def _add_relative_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """レース内の相対特徴量（Zスコア・ランク）を追加する.
+
+        各馬の能力指標について、同一レース出走馬の中での
+        相対的な位置付けを示す特徴量を計算する。
+
+        Args:
+            df: 1レース分の特徴量 DataFrame（kettonum がインデックス）
+
+        Returns:
+            相対特徴量を追加した DataFrame
+        """
+        result = df.copy()
+
+        for feat_name, ascending in self._RELATIVE_TARGETS:
+            if feat_name not in result.columns:
+                # 対象特徴量が存在しない場合はデフォルト値で埋める
+                result[f"rel_{feat_name}_zscore"] = 0.0
+                result[f"rel_{feat_name}_rank"] = 0.0
+                continue
+
+            # 欠損値（MISSING_NUMERIC / MISSING_RATE）を NaN に変換
+            col = result[feat_name].copy()
+            col = col.replace(MISSING_NUMERIC, np.nan)
+            col = col.replace(MISSING_RATE, np.nan)
+            col = pd.to_numeric(col, errors="coerce")
+
+            # Zスコア: (値 - レース内平均) / レース内標準偏差
+            race_mean = col.mean()
+            race_std = col.std()
+
+            if race_std is not None and race_std > 0:
+                zscore = (col - race_mean) / race_std
+                result[f"rel_{feat_name}_zscore"] = zscore.fillna(0.0)
+            else:
+                result[f"rel_{feat_name}_zscore"] = 0.0
+
+            # レース内順位（1 = 最良）
+            result[f"rel_{feat_name}_rank"] = col.rank(
+                ascending=ascending, method="min", na_option="bottom",
+            ).fillna(len(result))
+
+        return result
 
     # ------------------------------------------------------------------
     # クロス特徴量（カテゴリ16）

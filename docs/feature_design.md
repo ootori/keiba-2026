@@ -441,6 +441,86 @@ WHERE u.ketto3infohanNum1 = :father_hansyoku_num  -- 同じ父
 
 ---
 
+### カテゴリ17: レース内相対特徴量（rel_*）
+
+**実装ファイル:** `src/features/pipeline.py`（FeaturePipeline._add_relative_features()）
+
+競馬は相対的な競争であり、同レース出走馬の中での相対的な位置付けが重要。
+各馬の主要能力指標について、レース内でのZスコア（標準化偏差値）とランク（順位）を算出する。
+
+**対象特徴量と方向性:**
+
+| 元特徴量 | ascending | 説明 |
+|---------|-----------|------|
+| speed_index_avg_last3 | False | 高い方が良い |
+| speed_index_last | False | 高い方が良い |
+| speed_l3f_avg_last3 | True | 小さい（速い）方が良い |
+| speed_l3f_best_last5 | True | 小さい方が良い |
+| horse_fukusho_rate | False | 高い方が良い |
+| horse_fukusho_rate_last5 | False | 高い方が良い |
+| horse_avg_jyuni_last3 | True | 小さい（着順が良い）方が良い |
+| horse_win_rate | False | 高い方が良い |
+| jockey_win_rate_year | False | 高い方が良い |
+| jockey_fukusho_rate_year | False | 高い方が良い |
+| trainer_win_rate_year | False | 高い方が良い |
+| training_hanro_time4 | True | 小さい（速い）方が良い |
+| blood_father_turf_rate | False | 高い方が良い |
+| blood_father_dirt_rate | False | 高い方が良い |
+
+**生成される特徴量（14ターゲット × 2 = 28個）:**
+
+| # | 特徴量名 | 型 | 説明 |
+|---|---------|---|------|
+| 131 | rel_speed_index_avg_last3_zscore | float | スピード指数（直近3走平均）のレース内Zスコア |
+| 132 | rel_speed_index_avg_last3_rank | float | スピード指数（直近3走平均）のレース内順位 |
+| 133 | rel_speed_index_last_zscore | float | 前走スピード指数のレース内Zスコア |
+| 134 | rel_speed_index_last_rank | float | 前走スピード指数のレース内順位 |
+| 135 | rel_speed_l3f_avg_last3_zscore | float | 上がり3F平均のレース内Zスコア |
+| 136 | rel_speed_l3f_avg_last3_rank | float | 上がり3F平均のレース内順位 |
+| 137 | rel_speed_l3f_best_last5_zscore | float | 上がり3Fベストのレース内Zスコア |
+| 138 | rel_speed_l3f_best_last5_rank | float | 上がり3Fベストのレース内順位 |
+| 139 | rel_horse_fukusho_rate_zscore | float | 通算複勝率のレース内Zスコア |
+| 140 | rel_horse_fukusho_rate_rank | float | 通算複勝率のレース内順位 |
+| 141 | rel_horse_fukusho_rate_last5_zscore | float | 直近5走複勝率のレース内Zスコア |
+| 142 | rel_horse_fukusho_rate_last5_rank | float | 直近5走複勝率のレース内順位 |
+| 143 | rel_horse_avg_jyuni_last3_zscore | float | 直近3走平均着順のレース内Zスコア |
+| 144 | rel_horse_avg_jyuni_last3_rank | float | 直近3走平均着順のレース内順位 |
+| 145 | rel_horse_win_rate_zscore | float | 通算勝率のレース内Zスコア |
+| 146 | rel_horse_win_rate_rank | float | 通算勝率のレース内順位 |
+| 147 | rel_jockey_win_rate_year_zscore | float | 騎手勝率のレース内Zスコア |
+| 148 | rel_jockey_win_rate_year_rank | float | 騎手勝率のレース内順位 |
+| 149 | rel_jockey_fukusho_rate_year_zscore | float | 騎手複勝率のレース内Zスコア |
+| 150 | rel_jockey_fukusho_rate_year_rank | float | 騎手複勝率のレース内順位 |
+| 151 | rel_trainer_win_rate_year_zscore | float | 調教師勝率のレース内Zスコア |
+| 152 | rel_trainer_win_rate_year_rank | float | 調教師勝率のレース内順位 |
+| 153 | rel_training_hanro_time4_zscore | float | 坂路4FタイムのZスコア |
+| 154 | rel_training_hanro_time4_rank | float | 坂路4Fタイムのレース内順位 |
+| 155 | rel_blood_father_turf_rate_zscore | float | 父産駒芝複勝率のレース内Zスコア |
+| 156 | rel_blood_father_turf_rate_rank | float | 父産駒芝複勝率のレース内順位 |
+| 157 | rel_blood_father_dirt_rate_zscore | float | 父産駒ダート複勝率のレース内Zスコア |
+| 158 | rel_blood_father_dirt_rate_rank | float | 父産駒ダート複勝率のレース内順位 |
+
+**算出ロジック:**
+
+```python
+# Zスコア: (値 - レース内平均) / レース内標準偏差
+# 欠損値（MISSING_NUMERIC=-1, MISSING_RATE=0）はNaN扱い
+col = result[feat_name].replace(MISSING_NUMERIC, np.nan)
+race_mean = col.mean()
+race_std = col.std()
+zscore = (col - race_mean) / race_std  # std==0の場合は全馬0.0
+
+# ランク: ascending設定に従い順位付け（1=最良）
+# 欠損値は最下位扱い（na_option="bottom"）
+rank = col.rank(ascending=ascending, method="min", na_option="bottom")
+```
+
+**設計根拠:**
+LightGBMは分岐でのthreshold比較なので、絶対値では「同レースのライバルより上か下か」が判断しにくい。
+Zスコアやランク特徴量を入れることで、相対的な実力差がダイレクトにモデルに伝わる。
+
+---
+
 ## 特徴量の合計
 
 | カテゴリ | 特徴量数 |
@@ -461,7 +541,8 @@ WHERE u.ketto3infohanNum1 = :father_hansyoku_num  -- 同じ父
 | 間隔 | 5 |
 | オッズ | 7 |
 | クロス特徴量 | 8 |
-| **合計** | **130** |
+| レース内相対特徴量 | 28 |
+| **合計** | **158** |
 
 ---
 
@@ -511,3 +592,4 @@ LightGBMの設定で `use_missing=true`, `zero_as_missing=false` とすること
 | 14. 間隔 | src/features/horse.py | HorseFeatureExtractor |
 | 15. オッズ | src/features/odds.py | OddsFeatureExtractor |
 | 16. クロス特徴量 | src/features/pipeline.py | FeaturePipeline._add_cross_features() |
+| 17. レース内相対特徴量 | src/features/pipeline.py | FeaturePipeline._add_relative_features() |
