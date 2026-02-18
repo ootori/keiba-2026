@@ -19,6 +19,12 @@
 
     # オッズありモデル（デフォルトはオッズ除外）
     python run_train.py --with-odds
+
+    # LambdaRank（ランキング学習）モードで学習
+    python run_train.py --ranking
+
+    # LambdaRank + モデル名指定
+    python run_train.py --ranking --model-name ranking_model
 """
 
 from __future__ import annotations
@@ -80,6 +86,11 @@ def parse_args() -> argparse.Namespace:
         "--with-odds",
         action="store_true",
         help="オッズ特徴量を含める（明示的に指定時のみ）",
+    )
+    parser.add_argument(
+        "--ranking",
+        action="store_true",
+        help="LambdaRank（ランキング学習）モードで学習する",
     )
     parser.add_argument(
         "--model-name",
@@ -207,10 +218,12 @@ def step_train(
     train_df: pd.DataFrame,
     valid_df: pd.DataFrame,
     model_name: str,
+    ranking: bool = False,
 ) -> None:
     """Step 2: モデル学習 + 評価."""
     logger.info("=" * 60)
-    logger.info("Step 2: モデル学習")
+    mode_str = "LambdaRank" if ranking else "二値分類"
+    logger.info("Step 2: モデル学習（%s）", mode_str)
     logger.info("=" * 60)
 
     # target カラムが存在するか確認
@@ -218,12 +231,23 @@ def step_train(
         logger.error("target カラムが見つかりません")
         return
 
+    # LambdaRank の場合は target_relevance が必要
+    if ranking and "target_relevance" not in train_df.columns:
+        logger.error(
+            "target_relevance カラムが見つかりません。"
+            " parquet を --force-rebuild で再構築してください。"
+        )
+        return
+
     # NaN のある行を除外
-    train_df = train_df.dropna(subset=["target"]).copy()
-    valid_df = valid_df.dropna(subset=["target"]).copy()
+    drop_cols = ["target"]
+    if ranking:
+        drop_cols.append("target_relevance")
+    train_df = train_df.dropna(subset=drop_cols).copy()
+    valid_df = valid_df.dropna(subset=drop_cols).copy()
 
     # 学習
-    trainer = ModelTrainer()
+    trainer = ModelTrainer(ranking=ranking)
     model = trainer.train(train_df, valid_df)
 
     # 保存
@@ -244,7 +268,7 @@ def step_train(
     logger.info("=" * 60)
     evaluator = ModelEvaluator()
     metrics = evaluator.evaluate(
-        model, valid_df, trainer.feature_columns
+        model, valid_df, trainer.feature_columns, ranking=ranking
     )
 
     logger.info("評価結果:")
@@ -264,7 +288,8 @@ def step_train(
         "value_bet",
     ]:
         result = evaluator.simulate_return(
-            valid_df, trainer.feature_columns, model, strategy=strategy
+            valid_df, trainer.feature_columns, model,
+            strategy=strategy, ranking=ranking,
         )
         logger.info(
             "  [%s] 回収率: %.1f%%, 的中率: %.1f%% (%d/%d)",
@@ -285,14 +310,19 @@ def step_eval_only(args: argparse.Namespace) -> None:
     # モデルロード
     trainer = ModelTrainer()
     model = trainer.load_model(name=args.model_name)
+    ranking = trainer.ranking  # メタデータから復元
+
+    if args.ranking:
+        ranking = True  # CLI で明示指定された場合を優先
 
     # 評価
     logger.info("=" * 60)
-    logger.info("Step 4: モデル評価")
+    mode_str = "LambdaRank" if ranking else "二値分類"
+    logger.info("Step 4: モデル評価（%s）", mode_str)
     logger.info("=" * 60)
     evaluator = ModelEvaluator()
     metrics = evaluator.evaluate(
-        model, valid_df, trainer.feature_columns
+        model, valid_df, trainer.feature_columns, ranking=ranking
     )
 
     logger.info("評価結果:")
@@ -312,7 +342,8 @@ def step_eval_only(args: argparse.Namespace) -> None:
         "value_bet",
     ]:
         result = evaluator.simulate_return(
-            valid_df, trainer.feature_columns, model, strategy=strategy
+            valid_df, trainer.feature_columns, model,
+            strategy=strategy, ranking=ranking,
         )
         logger.info(
             "  [%s] 回収率: %.1f%%, 的中率: %.1f%% (%d/%d)",
@@ -332,6 +363,7 @@ def main() -> None:
         sys.exit(1)
 
     include_odds = args.with_odds  # --with-odds指定時のみオッズを含める
+    ranking = args.ranking
 
     if args.eval_only:
         # 評価・回収率シミュレーションのみ
@@ -340,7 +372,7 @@ def main() -> None:
     elif args.train_only:
         # 既存特徴量からの学習のみ
         train_df, valid_df = step_load_features(args)
-        step_train(train_df, valid_df, args.model_name)
+        step_train(train_df, valid_df, args.model_name, ranking=ranking)
 
     elif args.build_features_only:
         # 特徴量構築のみ
@@ -349,7 +381,7 @@ def main() -> None:
     else:
         # フル実行: 特徴量構築 → 学習 → 評価
         train_df, valid_df = step_build_features(args, include_odds)
-        step_train(train_df, valid_df, args.model_name)
+        step_train(train_df, valid_df, args.model_name, ranking=ranking)
 
     logger.info("完了!")
 

@@ -17,7 +17,12 @@ logger = logging.getLogger(__name__)
 
 
 class ModelEvaluator:
-    """モデルの評価と回収率シミュレーションを実行する."""
+    """モデルの評価と回収率シミュレーションを実行する.
+
+    ranking=True の場合、LambdaRank モデルとして評価する。
+    LambdaRank の出力はランキングスコア（高いほど上位）であるため、
+    logloss は算出せず NDCG とレース単位の的中率で評価する。
+    """
 
     def evaluate(
         self,
@@ -25,6 +30,7 @@ class ModelEvaluator:
         valid_df: pd.DataFrame,
         feature_columns: list[str],
         target_col: str = "target",
+        ranking: bool = False,
     ) -> dict[str, Any]:
         """検証データでモデルを評価する.
 
@@ -32,7 +38,8 @@ class ModelEvaluator:
             model: 学習済みモデル
             valid_df: 検証データ
             feature_columns: 特徴量カラム
-            target_col: 目的変数カラム
+            target_col: 目的変数カラム（二値分類のラベル）
+            ranking: LambdaRank モデルか
 
         Returns:
             評価指標の辞書
@@ -48,18 +55,29 @@ class ModelEvaluator:
         # 予測
         y_pred = model.predict(X_valid)
 
-        # 基本指標
         metrics: dict[str, Any] = {
-            "logloss": log_loss(y_valid, y_pred),
-            "auc": roc_auc_score(y_valid, y_pred),
             "n_samples": len(y_valid),
             "positive_rate": float(y_valid.mean()),
+            "ranking_mode": ranking,
         }
 
-        logger.info("LogLoss: %.6f", metrics["logloss"])
-        logger.info("AUC: %.6f", metrics["auc"])
+        if ranking:
+            # LambdaRank: スコアは確率ではないため logloss は不適用
+            # AUC は二値ラベルに対するランキング指標として引き続き有効
+            metrics["auc"] = roc_auc_score(y_valid, y_pred)
+            logger.info("AUC (ranking score vs top3 label): %.6f", metrics["auc"])
 
-        # レース単位の評価
+            # NDCG をレース単位で算出
+            ndcg_metrics = self._compute_ndcg(valid_df, y_pred)
+            metrics.update(ndcg_metrics)
+        else:
+            # 二値分類: 従来どおり
+            metrics["logloss"] = log_loss(y_valid, y_pred)
+            metrics["auc"] = roc_auc_score(y_valid, y_pred)
+            logger.info("LogLoss: %.6f", metrics["logloss"])
+            logger.info("AUC: %.6f", metrics["auc"])
+
+        # レース単位の評価（共通）
         valid_df = valid_df.copy()
         valid_df["pred_prob"] = y_pred
 
@@ -67,6 +85,76 @@ class ModelEvaluator:
         metrics.update(race_metrics)
 
         return metrics
+
+    def _compute_ndcg(
+        self,
+        valid_df: pd.DataFrame,
+        y_pred: np.ndarray,
+        ks: list[int] | None = None,
+    ) -> dict[str, float]:
+        """レース単位で NDCG@k を算出する.
+
+        Args:
+            valid_df: 検証データ（target_relevance カラム必須）
+            y_pred: モデルの予測スコア
+            ks: 評価する k のリスト
+
+        Returns:
+            NDCG 指標の辞書
+        """
+        if ks is None:
+            ks = [1, 3, 5]
+
+        relevance_col = "target_relevance"
+        if relevance_col not in valid_df.columns:
+            return {}
+
+        df = valid_df.copy()
+        df["_pred_score"] = y_pred
+
+        key_cols = [f"_key_{c}" for c in RACE_KEY_COLS if f"_key_{c}" in df.columns]
+        if not key_cols:
+            return {}
+
+        ndcg_sums: dict[int, float] = {k: 0.0 for k in ks}
+        total_races = 0
+
+        for _, group in df.groupby(key_cols):
+            if len(group) < 2:
+                continue
+            total_races += 1
+
+            # 予測スコアでソート（降順）
+            sorted_by_pred = group.sort_values("_pred_score", ascending=False)
+            pred_relevances = sorted_by_pred[relevance_col].values
+
+            # 理想的なソート（関連度の降順）
+            ideal_relevances = np.sort(group[relevance_col].values)[::-1]
+
+            for k in ks:
+                dcg = self._dcg_at_k(pred_relevances, k)
+                idcg = self._dcg_at_k(ideal_relevances, k)
+                if idcg > 0:
+                    ndcg_sums[k] += dcg / idcg
+                else:
+                    ndcg_sums[k] += 1.0  # 全馬同一関連度の場合
+
+        result: dict[str, float] = {}
+        for k in ks:
+            val = ndcg_sums[k] / total_races if total_races > 0 else 0.0
+            result[f"ndcg@{k}"] = val
+            logger.info("NDCG@%d: %.6f", k, val)
+
+        return result
+
+    @staticmethod
+    def _dcg_at_k(relevances: np.ndarray, k: int) -> float:
+        """DCG@k を算出する."""
+        relevances = relevances[:k]
+        if len(relevances) == 0:
+            return 0.0
+        discounts = np.log2(np.arange(1, len(relevances) + 1) + 1)
+        return float(np.sum(relevances / discounts))
 
     def _evaluate_by_race(
         self,
@@ -118,8 +206,13 @@ class ModelEvaluator:
         model: lgb.Booster,
         target_col: str = "target",
         strategy: str = "top1_tansho",
+        ranking: bool = False,
     ) -> dict[str, Any]:
         """回収率シミュレーションを実行する.
+
+        LambdaRank モデルの場合も、予測スコアが高い馬を上位として
+        同じ賭け戦略を適用する。スコアの絶対値は異なるが、
+        レース内でのランキング（nlargest）は同様に機能する。
 
         Args:
             valid_df: 検証データ
@@ -135,6 +228,7 @@ class ModelEvaluator:
                 - 'top3_sanrenpuku': 予測Top3の三連複を購入
                 - 'top3_sanrentan': 予測Top3の三連単を購入（1位→2位→3位）
                 - 'value_bet': 期待値ベースの購入
+            ranking: LambdaRank モデルか
 
         Returns:
             回収率シミュレーション結果

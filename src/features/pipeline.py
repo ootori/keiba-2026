@@ -424,11 +424,27 @@ class FeaturePipeline:
             "jyo_codes": tuple(jyo_codes),
         })
 
-    def _get_target(self, race_key: dict[str, str]) -> pd.Series:
-        """目的変数（3着以内=1, 他=0）を取得する."""
+    def _get_target(self, race_key: dict[str, str]) -> pd.DataFrame:
+        """目的変数を取得する.
+
+        Returns:
+            kettonum をインデックスとした DataFrame:
+                - target: 3着以内=1, 他=0（二値分類用）
+                - target_relevance: LambdaRank用関連度スコア
+                    1着=5, 2着=4, 3着=3, 4着=2, 5着=1, 6着以下=0
+                - kakuteijyuni: 確定着順（生値）
+        """
         sql = """
         SELECT kettonum,
-            CASE WHEN CAST(kakuteijyuni AS integer) <= 3 THEN 1 ELSE 0 END AS target
+            CAST(kakuteijyuni AS integer) AS kakuteijyuni,
+            CASE WHEN CAST(kakuteijyuni AS integer) <= 3 THEN 1 ELSE 0 END AS target,
+            CASE
+                WHEN CAST(kakuteijyuni AS integer) = 1 THEN 5
+                WHEN CAST(kakuteijyuni AS integer) = 2 THEN 4
+                WHEN CAST(kakuteijyuni AS integer) = 3 THEN 3
+                WHEN CAST(kakuteijyuni AS integer) <= 5 THEN 1
+                ELSE 0
+            END AS target_relevance
         FROM n_uma_race
         WHERE year = %(year)s AND monthday = %(monthday)s
           AND jyocd = %(jyocd)s AND kaiji = %(kaiji)s
@@ -438,8 +454,12 @@ class FeaturePipeline:
         """
         df = query_df(sql, race_key)
         if df.empty:
-            return pd.Series(dtype=int)
-        return df.set_index("kettonum")["target"]
+            return pd.DataFrame(
+                columns=["target", "target_relevance", "kakuteijyuni"]
+            )
+        return df.set_index("kettonum")[
+            ["target", "target_relevance", "kakuteijyuni"]
+        ]
 
     # ------------------------------------------------------------------
     # レース内相対特徴量（カテゴリ17）

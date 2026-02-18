@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -34,6 +35,7 @@ class Predictor:
         self.include_odds = include_odds
         self.model: lgb.Booster | None = None
         self.feature_columns: list[str] = []
+        self.ranking: bool = False
         self.pipeline = FeaturePipeline(include_odds=include_odds)
 
     def load(self) -> None:
@@ -51,10 +53,19 @@ class Predictor:
                 self.feature_columns = [
                     line.strip() for line in f if line.strip()
                 ]
+
+        # メタデータから ranking フラグを復元
+        meta_path = MODEL_DIR / f"{self.model_name}_meta.json"
+        if meta_path.exists():
+            with open(meta_path) as f:
+                meta = json.load(f)
+            self.ranking = meta.get("ranking", False)
+
         logger.info(
-            "モデルロード完了: %s (%d特徴量)",
+            "モデルロード完了: %s (%d特徴量, ranking=%s)",
             model_path,
             len(self.feature_columns),
+            self.ranking,
         )
 
     def predict_race(
@@ -191,16 +202,27 @@ class Predictor:
             lines.append(f"{track_name}{distance}m {baba} {tosu}頭 {grade}")
 
         lines.append("")
-        lines.append(f"{'予測':>4s}  {'馬番':>4s}  {'馬名':<16s}  {'確率':>6s}")
+        if self.ranking:
+            lines.append(f"{'予測':>4s}  {'馬番':>4s}  {'馬名':<16s}  {'スコア':>6s}")
+        else:
+            lines.append(f"{'予測':>4s}  {'馬番':>4s}  {'馬名':<16s}  {'確率':>6s}")
         lines.append("-" * 40)
 
         for _, row in prediction.iterrows():
             rank = int(row["pred_rank"])
             umaban = str(row.get("umaban", "")).strip()
             bamei = str(row.get("bamei", "")).strip()
-            prob = row["pred_prob"] * 100
 
-            lines.append(f"{rank:>4d}  {umaban:>4s}  {bamei:<16s}  {prob:>5.1f}%")
+            if self.ranking:
+                score = row["pred_prob"]
+                lines.append(
+                    f"{rank:>4d}  {umaban:>4s}  {bamei:<16s}  {score:>6.2f}"
+                )
+            else:
+                prob = row["pred_prob"] * 100
+                lines.append(
+                    f"{rank:>4d}  {umaban:>4s}  {bamei:<16s}  {prob:>5.1f}%"
+                )
 
         # 推奨買い目
         if len(prediction) >= 3:

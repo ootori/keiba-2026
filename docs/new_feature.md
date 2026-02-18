@@ -24,7 +24,7 @@
 | 9 | 特徴量追加 | コース区分（A/B/C/D）の活用 | ★★★ | 低 | 🔲 未着手 |
 | 10 | 特徴量追加 | 競走馬セール価格 | ★★ | 低 | 🔲 未着手 |
 | 11 | 特徴量改善 | 調教特徴量の強化 | ★★★ | 中 | 🔲 未着手 |
-| 12 | モデル改善 | 目的変数の多様化（LambdaRank等） | ★★★★★ | 高 | 🔲 未着手 |
+| 12 | モデル改善 | 目的変数の多様化（LambdaRank等） | ★★★★★ | 高 | ✅ 実装済（案A: LambdaRank） |
 | 13 | モデル改善 | 確率キャリブレーション | ★★★★ | 低 | 🔲 未着手 |
 | 14 | モデル改善 | 特徴量自動選択パイプライン | ★★★ | 中 | 🔲 未着手 |
 | 15 | モデル改善 | オッズ有無の2モデル体制 | ★★★ | 中 | 🔲 未着手 |
@@ -534,6 +534,47 @@ def relevance_score(jyuni: int) -> int:
     return 0
 ```
 
+### 実装ノート（2026-02-18 実装済み）
+
+- **実装箇所:** `src/model/trainer.py`（LambdaRank モード追加）、`src/model/evaluator.py`（NDCG評価追加）、`src/features/pipeline.py`（`_get_target()`に関連度スコア追加）、`src/config.py`（`LGBM_PARAMS_RANKING`追加）、`run_train.py`（`--ranking`オプション追加）、`src/model/predictor.py`（メタデータからranking自動検出）
+- **提案内容の採用:** 案A（LambdaRank）を採用。案B（マルチタスク学習）は将来の拡張として残す
+- **関連度スコア:** 提案どおり 1着=5, 2着=4, 3着=3, 4着=2, 5着=1, 6着以下=0（SQLで直接計算）
+- **group パラメータ:** `trainer.py` の `_prepare_groups()` でレースキーによるソートとグループサイズ計算を実装
+- **評価指標:** LambdaRank モードでは logloss の代わりに NDCG@1/3/5 をレース単位で算出。AUC は二値ラベルに対するランキング品質指標として引き続き使用
+- **メタデータ保存:** `{model_name}_meta.json` に `ranking` フラグを記録。`--eval-only` 時に自動検出
+- **使い方:** `python run_train.py --ranking --model-name ranking_model`（parquet に `target_relevance` が必要なため `--force-rebuild` で再構築すること）
+- **value_bet 戦略の注意:** LambdaRank の出力は確率ではないため、期待値ベットは二値分類モデルと組み合わせて使用することを推奨
+
+#### 性能改善の確認結果
+
+LambdaRank モデルの導入により、性能改善が確認された。
+
+**変更されたモジュール（7ファイル）:**
+
+| ファイル | 変更内容 |
+|---------|---------|
+| `src/config.py` | `LGBM_PARAMS_RANKING` 定数を追加 |
+| `src/features/pipeline.py` | `_get_target()` で `target_relevance`, `kakuteijyuni` を追加取得 |
+| `src/model/trainer.py` | `ranking` モード、`_train_ranking()`, `_prepare_groups()`, `_meta.json` 保存を追加 |
+| `src/model/evaluator.py` | `_compute_ndcg()`, `_dcg_at_k()` を追加。ranking モード時の評価分岐 |
+| `src/model/predictor.py` | `_meta.json` からの `ranking` フラグ自動復元、スコア表示切替 |
+| `run_train.py` | `--ranking` CLI オプション追加、全ステップで ranking 伝播 |
+| `CLAUDE.md` | LambdaRank 関連の記述・CLIオプション・注意事項を追加 |
+
+**設計上のポイント:**
+
+1. **後方互換性の維持:** `ranking=False`（デフォルト）では従来の二値分類モードがそのまま動作する。既存の parquet にも `target` カラムは引き続き含まれる
+2. **parquet の再構築が必要:** `target_relevance` と `kakuteijyuni` は `_get_target()` で SQL から直接計算するため、旧 parquet には含まれない。`--force-rebuild` が必要
+3. **group パラメータの生成:** `_prepare_groups()` でレースキーによるソートとグループサイズ計算を一括処理。LambdaRank は同一レースの馬が連続している前提なのでソート必須
+4. **メタデータによるモード自動検出:** `{model_name}_meta.json` に `ranking` フラグを保存。`--eval-only` 時や `predictor.py` のロード時にモードを自動検出
+5. **回収率シミュレーション:** LambdaRank のスコアは確率ではないがレース内の大小関係は保たれるため、`nlargest` ベースの賭け戦略は変更なしで動作する。`value_bet` のみ確率が必要なので注意
+
+**今後の拡張候補:**
+
+- 案B（マルチタスク学習）との組み合わせによるアンサンブル
+- 二値分類モデルの確率と LambdaRank のランクスコアを統合した最終予測
+- 関連度スコアの重み調整（例: 1着の重みをさらに大きくする等）のハイパーパラメータ化
+
 #### 案B: マルチタスク学習
 
 複数の目的変数を同時に予測する：
@@ -725,7 +766,7 @@ def _calc_waku_advantage(jyocd, kyori, trackcd, wakuban, race_date):
 12. **時系列オッズ**（#6） — 新モジュール追加
 
 ### フェーズ4（モデル構造の抜本改善）
-13. **LambdaRank**（#12） — trainer.py/evaluator.pyの大改修
+13. ~~**LambdaRank**（#12） — trainer.py/evaluator.pyの大改修~~ ✅ **実装済み**
 14. **賞金ベース特徴量**（#16） — 新規追加
 15. **セール価格**（#10） — 新規追加
 16. **コース区分・枠順クロス**（#9, #17） — 小改修

@@ -9,12 +9,30 @@ EveryDB2のPostgreSQLデータからLightGBMの特徴量を抽出する設計。
 
 ## 目的変数
 
+### 二値分類用（デフォルト）
+
 ```sql
 -- 3着以内なら1、それ以外は0
 CASE WHEN CAST(kakuteijyuni AS integer) <= 3 THEN 1 ELSE 0 END AS target
 ```
 
-対象条件:
+### LambdaRank用（`--ranking` モード）
+
+```sql
+-- 着順ベースの関連度スコア
+CASE
+    WHEN CAST(kakuteijyuni AS integer) = 1 THEN 5
+    WHEN CAST(kakuteijyuni AS integer) = 2 THEN 4
+    WHEN CAST(kakuteijyuni AS integer) = 3 THEN 3
+    WHEN CAST(kakuteijyuni AS integer) <= 5 THEN 1
+    ELSE 0
+END AS target_relevance
+```
+
+LambdaRank では上記関連度スコアを目的変数とし、レース単位の group パラメータ（各レースの出走頭数）を付与してランキング学習を行う。NDCG@1/3/5 で評価する。
+
+### 共通の対象条件
+
 - `datakubun = '7'`（確定成績）
 - `ijyocd = '0'`（正常出走のみ）
 - `jyocd` IN ('01'～'10')（JRA中央10場のみ）

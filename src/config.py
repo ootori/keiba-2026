@@ -92,6 +92,27 @@ LGBM_PARAMS: dict = {
 }
 
 # ---------------------------------------------------------------------------
+# LightGBM LambdaRank パラメータ
+# ---------------------------------------------------------------------------
+LGBM_PARAMS_RANKING: dict = {
+    "objective": "lambdarank",
+    "metric": "ndcg",
+    "ndcg_eval_at": [1, 3, 5],
+    "boosting_type": "gbdt",
+    "num_leaves": 63,
+    "learning_rate": 0.05,
+    "feature_fraction": 0.8,
+    "bagging_fraction": 0.8,
+    "bagging_freq": 5,
+    "min_child_samples": 50,
+    "lambda_l1": 0.1,
+    "lambda_l2": 0.1,
+    "verbose": -1,
+    "n_jobs": -1,
+    "seed": 42,
+}
+
+# ---------------------------------------------------------------------------
 # 欠損値のデフォルト
 # ---------------------------------------------------------------------------
 MISSING_NUMERIC: float = -1.0

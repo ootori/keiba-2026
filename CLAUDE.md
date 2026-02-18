@@ -47,16 +47,16 @@ everydb2/
 │   │   └── pipeline.py              # 特徴量パイプライン統合+クロス特徴量（カテゴリ16）
 │   ├── model/
 │   │   ├── __init__.py
-│   │   ├── trainer.py                # LightGBMの学習
-│   │   ├── predictor.py              # 予測実行
-│   │   └── evaluator.py             # モデル評価・回収率シミュレーション
+│   │   ├── trainer.py                # LightGBMの学習（二値分類+LambdaRank対応）
+│   │   ├── predictor.py              # 予測実行（メタデータからranking自動検出）
+│   │   └── evaluator.py             # モデル評価・回収率シミュレーション（NDCG対応）
 │   └── utils/
 │       ├── __init__.py
 │       ├── code_master.py            # コード表変換ユーティリティ
 │       └── base_time.py              # 基準タイムテーブル（スピード指数用）
 ├── notebooks/
 │   └── exploration.ipynb             # データ探索用ノートブック
-├── models/                           # 学習済みモデル保存先（*.txt, *_features.txt）
+├── models/                           # 学習済みモデル保存先（*.txt, *_features.txt, *_meta.json）
 ├── data/                             # 中間データキャッシュ（*.parquet, base_time_table.csv）
 └── tests/
     └── test_features.py              # 30テスト（pytest）
@@ -121,8 +121,10 @@ everydb2/
 
 ### 問題設定
 - **入力:** 1レースの全出走馬の特徴量
-- **出力:** 各馬の3着以内確率（LightGBMの二値分類）
-- **目的変数:** `KakuteiJyuni` が 1, 2, 3 なら 1、それ以外は 0
+- **出力（二値分類モード）:** 各馬の3着以内確率（LightGBMの二値分類）
+- **出力（LambdaRankモード）:** 各馬のランキングスコア（高いほど上位予測）
+- **目的変数（二値分類）:** `target` — `KakuteiJyuni` が 1, 2, 3 なら 1、それ以外は 0
+- **目的変数（LambdaRank）:** `target_relevance` — 関連度スコア（1着=5, 2着=4, 3着=3, 4着=2, 5着=1, 6着以下=0）
 - **データリーク防止:** 特徴量は必ず「当該レースより過去のデータ」のみで構成
 
 ### 学習/評価の時間分割
@@ -214,6 +216,16 @@ python run_train.py --with-odds
 
 # モデル名を指定
 python run_train.py --model-name my_model
+
+# LambdaRank（ランキング学習）モードで学習
+# ※parquetにtarget_relevanceカラムが必要（--force-rebuildで再構築）
+python run_train.py --ranking --model-name ranking_model
+
+# LambdaRank + 既存特徴量から学習のみ
+python run_train.py --ranking --train-only --model-name ranking_model
+
+# LambdaRank モデルの評価のみ（メタデータからranking=Trueが自動検出される）
+python run_train.py --eval-only --model-name ranking_model
 ```
 
 ## 特徴量の年度別保存と並列構築
@@ -264,6 +276,10 @@ data/
 - **組番フォーマット（馬連/馬単/三連複/三連単）:** n_haraiの組番は2桁ゼロ埋め馬番の連結（馬連/馬単: 4桁 "0102"、三連複/三連単: 6桁 "010203"）。馬連・三連複はソート済み（小さい番号が先）、馬単・三連単は着順通り
 - **特徴量の train/valid 不整合防止:** `trainer.py` では train_df と valid_df の両方に存在するカラムのみを特徴量として使用する。parquet の再構築タイミング差でカラム不整合が起きた場合はWARNINGログで通知。全特徴量を使いたい場合は `--force-rebuild` で全年度を再構築すること
 - **レース内相対特徴量のparquet依存:** 相対特徴量（`rel_*`）は `pipeline.py` の `_add_relative_features()` で構築時に計算される。既存 parquet には含まれないため、この特徴量を使うには対象年度の parquet を `--force-rebuild` で再構築する必要がある
+- **LambdaRank の parquet 依存:** LambdaRank モード（`--ranking`）には `target_relevance` と `kakuteijyuni` カラムが必要。これらは `_get_target()` で構築時に生成される。旧 parquet には含まれないため、`--force-rebuild` で再構築が必要
+- **LambdaRank のモデルメタデータ:** `trainer.py` はモデル保存時に `{name}_meta.json` を出力し、`ranking` フラグを記録する。`--eval-only` 実行時にこのメタデータから自動的に LambdaRank モードを検出する
+- **LambdaRank の group パラメータ:** LambdaRank では同一レースの馬が連続している必要がある。`trainer.py` の `_prepare_groups()` でレースキーによるソートとグループサイズ計算を行う
+- **LambdaRank の value_bet 戦略:** LambdaRank の出力は確率ではなくランキングスコアのため、`value_bet`（期待値ベース）戦略はそのままでは確率的に意味をなさない。二値分類モデルとのアンサンブルで使うことを推奨
 - **MISSING_RATE=0.0 の特徴量ごとの意味の違い:** `_add_relative_features()` では `missing_type` パラメータで欠損値処理を3パターンに分類している。rate系特徴量（勝率・複勝率等）では0.0は「0%」という正当な値であり、NaN化すると弱い馬のZスコアが平均に引き上げられ性能が低下する。新しい相対特徴量を追加する際は `missing_type` を必ず適切に設定すること（"numeric"/"rate"/"blood"）
 
 ## 回収率シミュレーション戦略
