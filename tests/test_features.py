@@ -430,6 +430,57 @@ class TestFeaturePipeline:
         assert result.loc["horse_a", "rel_speed_index_avg_last3_zscore"] > 0
         assert result.loc["horse_c", "rel_speed_index_avg_last3_zscore"] < 0
 
+    def test_add_relative_features_rate_zero_is_valid(self) -> None:
+        """率系特徴量で0.0がNaN扱いされないことを確認する.
+
+        horse_fukusho_rate=0.0は「複勝率ゼロ」という正当な値。
+        MISSING_RATEと混同してNaN化してはいけない。
+        """
+        from src.features.pipeline import FeaturePipeline
+
+        pipeline = FeaturePipeline(include_odds=False)
+
+        df = pd.DataFrame(
+            {
+                "horse_fukusho_rate": [0.5, 0.3, 0.0],  # 0.0 = 正当な値
+                "horse_win_rate": [0.2, 0.0, 0.1],      # 0.0 = 正当な値
+            },
+            index=["horse_a", "horse_b", "horse_c"],
+        )
+
+        result = pipeline._add_relative_features(df)
+
+        # 0.0は有効値として計算に含まれる（NaN扱いされない）
+        # horse_fukusho_rate: [0.5, 0.3, 0.0] → mean≈0.267, 0.0は最下位
+        zscore_c = result.loc["horse_c", "rel_horse_fukusho_rate_zscore"]
+        assert zscore_c < 0, f"0.0の馬のZスコアは負であるべき: {zscore_c}"
+        assert zscore_c != 0.0, "0.0の馬のZスコアが0.0 → NaN扱いされている"
+
+        # horse_win_rate: 0.0の馬bもZスコアは0ではない
+        zscore_b = result.loc["horse_b", "rel_horse_win_rate_zscore"]
+        assert zscore_b < 0, f"0.0の馬のZスコアは負であるべき: {zscore_b}"
+
+    def test_add_relative_features_blood_zero_is_missing(self) -> None:
+        """血統率系特徴量では0.0が欠損扱いされることを確認する.
+
+        blood_father_turf_rate=0.0は産駒データ不足を意味するため欠損扱い。
+        """
+        from src.features.pipeline import FeaturePipeline
+
+        pipeline = FeaturePipeline(include_odds=False)
+
+        df = pd.DataFrame(
+            {
+                "blood_father_turf_rate": [0.3, 0.0, 0.2],  # 0.0 = データなし
+            },
+            index=["horse_a", "horse_b", "horse_c"],
+        )
+
+        result = pipeline._add_relative_features(df)
+
+        # blood系の0.0はNaN → Zスコアは0.0（欠損埋め）になる
+        assert result.loc["horse_b", "rel_blood_father_turf_rate_zscore"] == 0.0
+
 
 # ============================================================
 # 合計特徴量数の確認

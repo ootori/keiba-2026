@@ -446,29 +446,34 @@ class FeaturePipeline:
     # ------------------------------------------------------------------
 
     # 相対化する特徴量の定義
-    # (元の特徴量名, ascending) — ascending=True: 値が小さいほどランク上位
-    _RELATIVE_TARGETS: list[tuple[str, bool]] = [
-        ("speed_index_avg_last3", False),      # スピード指数 → 高い方が良い
-        ("speed_index_last", False),            # 直近スピード指数
-        ("speed_l3f_avg_last3", True),          # 上がり3F平均 → 小さい方が良い
-        ("speed_l3f_best_last5", True),         # 上がり3Fベスト
-        ("horse_fukusho_rate", False),          # 複勝率
-        ("horse_fukusho_rate_last5", False),    # 直近5走複勝率
-        ("horse_avg_jyuni_last3", True),        # 直近3走平均着順 → 小さい方が良い
-        ("horse_win_rate", False),              # 勝率
-        ("jockey_win_rate_year", False),        # 騎手勝率
-        ("jockey_fukusho_rate_year", False),    # 騎手複勝率
-        ("trainer_win_rate_year", False),       # 調教師勝率
-        ("training_hanro_time4", True),         # 坂路4Fタイム → 小さい方が良い
-        ("blood_father_turf_rate", False),      # 父産駒芝複勝率
-        ("blood_father_dirt_rate", False),      # 父産駒ダート複勝率
+    # (元の特徴量名, ascending, missing_marker)
+    #   ascending=True: 値が小さいほどランク上位
+    #   missing_marker: 欠損値として扱う値のリスト
+    #     - 率系(0.0が正当な値): MISSING_NUMERIC(-1)のみ除外
+    #     - 数値系(0.0が異常値): MISSING_NUMERIC(-1)のみ除外
+    #     - 血統率系(0.0=データなし): MISSING_NUMERIC(-1)とMISSING_RATE(0.0)の両方を除外
+    _RELATIVE_TARGETS: list[tuple[str, bool, str]] = [
+        ("speed_index_avg_last3", False, "numeric"),   # スピード指数 → 高い方が良い
+        ("speed_index_last", False, "numeric"),         # 直近スピード指数
+        ("speed_l3f_avg_last3", True, "numeric"),       # 上がり3F平均 → 小さい方が良い
+        ("speed_l3f_best_last5", True, "numeric"),      # 上がり3Fベスト
+        ("horse_fukusho_rate", False, "rate"),           # 複勝率（0.0=正当な値）
+        ("horse_fukusho_rate_last5", False, "rate"),     # 直近5走複勝率
+        ("horse_avg_jyuni_last3", True, "numeric"),     # 直近3走平均着順 → 小さい方が良い
+        ("horse_win_rate", False, "rate"),               # 勝率（0.0=正当な値）
+        ("jockey_win_rate_year", False, "rate"),         # 騎手勝率（0.0=正当な値）
+        ("jockey_fukusho_rate_year", False, "rate"),     # 騎手複勝率
+        ("trainer_win_rate_year", False, "rate"),        # 調教師勝率
+        ("training_hanro_time4", True, "numeric"),       # 坂路4Fタイム → 小さい方が良い
+        ("blood_father_turf_rate", False, "blood"),      # 父産駒芝複勝率（0.0=データなし）
+        ("blood_father_dirt_rate", False, "blood"),      # 父産駒ダート複勝率
     ]
 
     @staticmethod
     def _relative_feature_names() -> list[str]:
         """相対特徴量名のリストを返す."""
         names: list[str] = []
-        for feat_name, _ in FeaturePipeline._RELATIVE_TARGETS:
+        for feat_name, _, _ in FeaturePipeline._RELATIVE_TARGETS:
             names.append(f"rel_{feat_name}_zscore")
             names.append(f"rel_{feat_name}_rank")
         return names
@@ -479,6 +484,12 @@ class FeaturePipeline:
         各馬の能力指標について、同一レース出走馬の中での
         相対的な位置付けを示す特徴量を計算する。
 
+        欠損値の扱いは特徴量の性質に応じて3パターン:
+        - "numeric": MISSING_NUMERIC(-1)のみNaN化。タイム・指数・着順系。
+        - "rate": MISSING_NUMERIC(-1)のみNaN化。0.0は「成績なし」で正当な値。
+        - "blood": MISSING_NUMERIC(-1)とMISSING_RATE(0.0)の両方をNaN化。
+                   血統産駒成績では0.0はデータ不足を意味するため。
+
         Args:
             df: 1レース分の特徴量 DataFrame（kettonum がインデックス）
 
@@ -487,18 +498,21 @@ class FeaturePipeline:
         """
         result = df.copy()
 
-        for feat_name, ascending in self._RELATIVE_TARGETS:
+        for feat_name, ascending, missing_type in self._RELATIVE_TARGETS:
             if feat_name not in result.columns:
                 # 対象特徴量が存在しない場合はデフォルト値で埋める
                 result[f"rel_{feat_name}_zscore"] = 0.0
                 result[f"rel_{feat_name}_rank"] = 0.0
                 continue
 
-            # 欠損値（MISSING_NUMERIC / MISSING_RATE）を NaN に変換
+            # 欠損値を NaN に変換（特徴量の性質に応じて判定）
             col = result[feat_name].copy()
-            col = col.replace(MISSING_NUMERIC, np.nan)
-            col = col.replace(MISSING_RATE, np.nan)
             col = pd.to_numeric(col, errors="coerce")
+            col = col.replace(MISSING_NUMERIC, np.nan)
+            if missing_type == "blood":
+                # 血統産駒成績: 0.0=データ不足のため欠損扱い
+                col = col.replace(MISSING_RATE, np.nan)
+            # "rate" / "numeric": 0.0は正当な値なので除外しない
 
             # Zスコア: (値 - レース内平均) / レース内標準偏差
             race_mean = col.mean()
