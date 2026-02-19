@@ -374,14 +374,18 @@ LIMIT 1
 | 108 | blood_bms_turf_rate | float | 母父産駒の芝複勝率 |
 | 109 | blood_bms_dirt_rate | float | 母父産駒のダート複勝率 |
 | 110 | blood_inbreed_flag | int | 近親交配フラグ（3代以内に同一祖先） |
-| 110a | blood_mother_id | cat | 母馬繁殖登録番号 |
-| 110b | blood_mother_keito | cat | 母系統名（KEITOテーブル） |
-| 110c | blood_nicks_rate | float | 父×母父コンビの産駒複勝率（過去5年集計） |
-| 110d | blood_nicks_runs | int | 父×母父コンビの産駒出走数 |
-| 110e | blood_father_baba_rate | float | 父産駒の「今回の馬場状態」での複勝率（過去3年） |
-| 110f | blood_father_jyo_rate | float | 父産駒の「今回の競馬場」での複勝率（過去3年） |
-| 110g | blood_inbreed_generation | int | 近親交配が発生した最も近い世代（0=なし, 2=2代, 3=3代） |
-| 110h | blood_mother_produce_rate | float | 母の産駒（兄弟姉妹）の複勝率（過去10年、自身除外） |
+| 110a | blood_mother_keito | cat | 母系統名（KEITOテーブル） |
+| 110b | blood_nicks_rate | float | 父×母父コンビの産駒複勝率（過去5年集計） |
+| 110c | blood_nicks_runs | int | 父×母父コンビの産駒出走数 |
+| 110d | blood_father_baba_rate | float | 父産駒の「今回の馬場状態」での複勝率（過去3年） |
+| 110e | blood_father_jyo_rate | float | 父産駒の「今回の競馬場」での複勝率（過去3年） |
+| 110f | blood_inbreed_generation | int | 近親交配が発生した最も近い世代（0=なし, 2=2代, 3=3代） |
+| 110g | blood_mother_produce_rate | float | 母の産駒（兄弟姉妹）の複勝率（過去10年、自身除外） |
+
+**設計上の注意:**
+- `blood_mother_id`（母馬繁殖登録番号）は削除済み。数千種のユニーク値を持つ高カーディナリティIDであり、カテゴリ変数では過学習、数値変数では意味のない分割を招くため。母馬の情報は `blood_mother_keito`（母系統）と `blood_mother_produce_rate`（母産駒成績）で十分にカバーされる
+- `blood_nicks_rate` / `blood_mother_produce_rate` の0.0は「データ不足」を意味し、「複勝率0%」とは異なる。相対特徴量では `missing_type="blood"` で0.0をNaN化してからZスコアを計算する
+- `_get_nicks_stats()` は父×母父の全組み合わせを1回のGROUP BYクエリでバッチ取得する（個別クエリはDB負荷が大きいため）
 
 **父系統の取得:**
 ```sql

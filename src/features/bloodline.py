@@ -1,8 +1,7 @@
 """血統 特徴量（カテゴリ13）.
 
-既存10特徴量 + 新規8特徴量 = 合計18特徴量。
+既存10特徴量 + 新規7特徴量 = 合計17特徴量。
 新規特徴量:
-  - blood_mother_id: 母馬繁殖登録番号
   - blood_mother_keito: 母系統名
   - blood_nicks_rate: 父×母父コンビの産駒複勝率
   - blood_nicks_runs: 父×母父コンビの産駒出走数
@@ -43,7 +42,6 @@ class BloodlineFeatureExtractor(FeatureExtractor):
         "blood_bms_dirt_rate",
         "blood_inbreed_flag",
         # 新規特徴量
-        "blood_mother_id",
         "blood_mother_keito",
         "blood_nicks_rate",
         "blood_nicks_runs",
@@ -208,8 +206,7 @@ class BloodlineFeatureExtractor(FeatureExtractor):
 
             # --- 新規特徴量 ---
 
-            # 母馬ID・系統
-            feat["blood_mother_id"] = mo_num if mo_num else MISSING_CATEGORY
+            # 母系統
             feat["blood_mother_keito"] = keito_map.get(
                 mo_num, MISSING_CATEGORY
             )
@@ -639,6 +636,7 @@ class BloodlineFeatureExtractor(FeatureExtractor):
 
         同じ父×母父の組み合わせを持つ全産駒の成績を集計し、
         その組み合わせの複勝率と出走数を返す。
+        バッチクエリで全ペアを一括取得する。
 
         Args:
             pairs: (father_num, bms_num) のリスト
@@ -658,42 +656,53 @@ class BloodlineFeatureExtractor(FeatureExtractor):
         # ユニークなペアのみ処理
         unique_pairs = list(set(pairs))
 
+        # 父と母父の番号を収集
+        father_nums = list({p[0] for p in unique_pairs})
+        bms_nums = list({p[1] for p in unique_pairs})
+
+        # バッチクエリで全組み合わせを一括取得
+        sql = """
+        SELECT
+            s.fnum AS father_num,
+            s.mfnum AS bms_num,
+            COUNT(*) AS total,
+            SUM(CASE WHEN CAST(ur.kakuteijyuni AS int) <= 3
+                THEN 1 ELSE 0 END) AS top3
+        FROM n_sanku s
+        JOIN n_uma_race ur ON s.kettonum = ur.kettonum
+        JOIN n_race r USING (year, monthday, jyocd, kaiji, nichiji,
+                             racenum)
+        WHERE s.fnum IN %(father_nums)s
+          AND s.mfnum IN %(bms_nums)s
+          AND ur.datakubun = '7'
+          AND ur.ijyocd = '0'
+          AND r.jyocd IN ('01','02','03','04','05','06','07','08','09','10')
+          AND r.year >= %(year_start)s
+          AND (r.year || r.monthday) < %(race_date)s
+        GROUP BY s.fnum, s.mfnum
+        """
+        try:
+            df = query_df(sql, {
+                "father_nums": tuple(father_nums),
+                "bms_nums": tuple(bms_nums),
+                "year_start": year_start,
+                "race_date": race_date,
+            })
+        except Exception as e:
+            logger.warning("ニックス集計エラー: %s", e)
+            return {}
+
+        # 結果を辞書に変換（対象ペアのみ抽出）
+        target_pairs = {f"{f}_{b}" for f, b in unique_pairs}
         result: dict[str, dict[str, Any]] = {}
-        for f_num, bms_num in unique_pairs:
-            nicks_key = f"{f_num}_{bms_num}"
-            sql = """
-            SELECT
-                COUNT(*) AS total,
-                SUM(CASE WHEN CAST(ur.kakuteijyuni AS int) <= 3
-                    THEN 1 ELSE 0 END) AS top3
-            FROM n_sanku s
-            JOIN n_uma_race ur ON s.kettonum = ur.kettonum
-            JOIN n_race r USING (year, monthday, jyocd, kaiji, nichiji,
-                                 racenum)
-            WHERE s.fnum = %(father_num)s
-              AND s.mfnum = %(bms_num)s
-              AND ur.datakubun = '7'
-              AND ur.ijyocd = '0'
-              AND r.jyocd IN ('01','02','03','04','05','06','07','08','09','10')
-              AND r.year >= %(year_start)s
-              AND (r.year || r.monthday) < %(race_date)s
-            """
-            try:
-                df = query_df(sql, {
-                    "father_num": f_num,
-                    "bms_num": bms_num,
-                    "year_start": year_start,
-                    "race_date": race_date,
-                })
-            except Exception as e:
-                logger.warning("ニックス集計エラー (%s×%s): %s", f_num, bms_num, e)
+        for _, row in df.iterrows():
+            fn = str(row["father_num"]).strip()
+            bn = str(row["bms_num"]).strip()
+            nicks_key = f"{fn}_{bn}"
+            if nicks_key not in target_pairs:
                 continue
-
-            if df.empty:
-                continue
-
-            total = self._safe_int(df.iloc[0].get("total"), default=0)
-            top3 = self._safe_int(df.iloc[0].get("top3"), default=0)
+            total = self._safe_int(row.get("total"), default=0)
+            top3 = self._safe_int(row.get("top3"), default=0)
             result[nicks_key] = {
                 "rate": self._safe_rate(top3, total),
                 "runs": total,

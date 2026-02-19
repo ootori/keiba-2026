@@ -385,7 +385,6 @@ WHERE banusicode IN %(codes)s
 ```python
 # 追加特徴量
 blood_new_features = [
-    "blood_mother_id",              # 母馬繁殖登録番号
     "blood_mother_keito",           # 母系統名
     "blood_nicks_rate",             # 父×母父コンビの産駒複勝率
     "blood_nicks_runs",             # 父×母父コンビの産駒出走数
@@ -412,15 +411,15 @@ WHERE ur.datakubun = '7' AND ur.ijyocd = '0'
 GROUP BY s1.fnum, s2.fnum
 ```
 
-### 実装ノート（2026-02-18 実装済み）
+### 実装ノート（2026-02-19 実装済み）
 
-- **実装箇所:** `src/features/bloodline.py` を大幅拡張（既存10特徴量 + 新規8特徴量 = 合計18特徴量）
+- **実装箇所:** `src/features/bloodline.py` を大幅拡張（既存10特徴量 + 新規7特徴量 = 合計17特徴量）
 - **変更ファイル:**
-  - `src/features/bloodline.py`: 新規特徴量8個の追加、`_get_race_info()` の拡張、`_check_inbreeding()` の世代判定追加、`_get_nicks_stats()` / `_get_sire_baba_stats()` / `_get_sire_jyo_stats()` / `_get_mother_produce_stats()` の新規メソッド追加
-  - `src/config.py`: `CATEGORICAL_FEATURES` に `blood_mother_id`, `blood_mother_keito` を追加
+  - `src/features/bloodline.py`: 新規特徴量7個の追加、`_get_race_info()` の拡張、`_check_inbreeding()` の世代判定追加、`_get_nicks_stats()` / `_get_sire_baba_stats()` / `_get_sire_jyo_stats()` / `_get_mother_produce_stats()` の新規メソッド追加
+  - `src/config.py`: `CATEGORICAL_FEATURES` に `blood_mother_keito` を追加
   - `src/features/pipeline.py`: `_RELATIVE_TARGETS` に `blood_nicks_rate`, `blood_father_baba_rate`, `blood_father_jyo_rate`, `blood_mother_produce_rate` を追加（blood型欠損値処理）
   - `tests/test_features.py`: 近親交配世代判定テスト4件、相対特徴量テスト2件を追加
-  - `docs/feature_design.md`: 特徴量一覧に新規8特徴量を追加
+  - `docs/feature_design.md`: 特徴量一覧に新規7特徴量を追加
 - **提案からの変更点:**
   - ニックスの集計期間を5年に設定（3年では父×母父の組み合わせのサンプル数が不足しがちなため）
   - 母産駒成績の集計期間を10年に設定（兄弟姉妹の走歴が長期に渡るため）
@@ -428,6 +427,34 @@ GROUP BY s1.fnum, s2.fnum
   - 近親交配世代は `_check_inbreeding()` 静的メソッドとして分離し、テスト可能な設計に
 - **相対特徴量（レース内Zスコア・ランク）:** 新規4特徴量（nicks_rate, father_baba_rate, father_jyo_rate, mother_produce_rate）は blood 型欠損値処理で 0.0=データなしとして NaN 化
 - **注意:** parquet を再構築しないと新特徴量が含まれない。`--force-rebuild` で全年度を再構築すること
+
+### 設計判断ノート: blood_mother_id の削除（2026-02-19）
+
+**経緯:** 初期実装では `blood_mother_id`（母馬繁殖登録番号）を特徴量として含め、`CATEGORICAL_FEATURES` に登録していた。
+しかし母馬IDは数千～数万種類のユニーク値を持つ高カーディナリティ変数であり、以下の問題があった。
+
+- カテゴリ変数として扱う場合: LightGBMのカテゴリ分割が訓練データ固有のIDパターンに過学習する
+- 数値変数として扱う場合: ID番号の大小に意味がなく、分割閾値に根拠がない
+
+母馬の情報は `blood_mother_keito`（母系統）と `blood_mother_produce_rate`（母産駒成績）で十分にカバーされるため、
+`blood_mother_id` は特徴量から完全に削除した。
+
+**参考:**
+- `blood_father_id`（種牡馬ID）: 活躍する種牡馬は限られるため数百種類に収まる → カテゴリOK
+- `blood_bms_id`（母父ID）: 同上 → カテゴリOK
+
+**教訓:** 高カーディナリティのID変数は、カテゴリ変数では過学習、数値変数では無意味な分割を招く。
+IDの情報を活用したい場合は、系統名など上位の抽象度にマッピングするか、そのIDに紐づく成績統計量に変換して使用する。
+
+### 性能改善ノート: ニックスクエリのバッチ化（2026-02-19）
+
+**問題:** `_get_nicks_stats()` がペアごとに個別SQLを発行しており、
+1レースにN頭の異なる父×母父の組み合わせがあると最大N回のDBクエリが走っていた。
+1レースあたり十数回の追加クエリはDB負荷と特徴量構築時間の増大を招く。
+
+**修正:** `GROUP BY s.fnum, s.mfnum` の1バッチクエリに統合。
+全ペアの父番号・母父番号をそれぞれ `IN` 句で渡し、一括取得後にペアでフィルタする方式に変更。
+これにより1レースあたりのニックスDBクエリが N回 → 1回 に削減された。
 
 ---
 

@@ -495,8 +495,8 @@ class TestBloodlineFeatureExtractor:
         from src.features.bloodline import BloodlineFeatureExtractor
 
         ext = BloodlineFeatureExtractor()
-        # 既存10 + 新規8 = 18
-        assert len(ext.feature_names) == 18
+        # 既存10 + 新規7 = 17
+        assert len(ext.feature_names) == 17
 
     def test_check_inbreeding_no_inbreed(self) -> None:
         """近親交配なしの場合 (0, 0) を返す."""
