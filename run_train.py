@@ -129,6 +129,18 @@ def parse_args() -> argparse.Namespace:
         default="top3",
         help="目的変数: top3=3着以内（デフォルト）, win=1着",
     )
+    parser.add_argument(
+        "--build-supplement",
+        nargs="+",
+        metavar="NAME",
+        help="サプリメント（差分特徴量）を構築する。名前を指定（例: mining）",
+    )
+    parser.add_argument(
+        "--supplement",
+        nargs="+",
+        metavar="NAME",
+        help="学習/評価時にマージするサプリメント名（例: --supplement mining）",
+    )
     return parser.parse_args()
 
 
@@ -159,6 +171,8 @@ def step_build_features(
     logger.info("Step 1: 特徴量構築（年度別, workers=%d）", args.workers)
     logger.info("=" * 60)
 
+    supplement_names = args.supplement or []
+
     # 学習データ（複数年）
     logger.info("学習データ構築中 (%s〜%s)...", args.train_start, args.train_end)
     train_df = FeaturePipeline.build_years(
@@ -168,6 +182,13 @@ def step_build_features(
         workers=args.workers,
         force_rebuild=args.force_rebuild,
     )
+    # サプリメントマージ
+    if supplement_names:
+        from src.features.supplement import merge_supplements
+        train_df = merge_supplements(
+            train_df, supplement_names,
+            args.train_start, args.train_end,
+        )
 
     # 検証データ（1年分）
     logger.info("検証データ構築中 (%s)...", args.valid_year)
@@ -178,6 +199,12 @@ def step_build_features(
         workers=1,  # 1年分なので直列で十分
         force_rebuild=args.force_rebuild,
     )
+    if supplement_names:
+        from src.features.supplement import merge_supplements
+        valid_df = merge_supplements(
+            valid_df, supplement_names,
+            args.valid_year, args.valid_year,
+        )
 
     logger.info("学習データ: %d行, 検証データ: %d行", len(train_df), len(valid_df))
     return train_df, valid_df
@@ -190,11 +217,20 @@ def step_load_features(
 
     年度別 parquet（features_{year}.parquet）を優先してロードする。
     見つからない場合は旧方式（train_features.parquet / valid_features.parquet）を試みる。
+    --supplement が指定されている場合はサプリメントもマージする。
     """
+    supplement_names = args.supplement or []
+
     # 年度別 parquet の存在チェック
     try:
-        train_df = FeaturePipeline.load_years(args.train_start, args.train_end)
-        valid_df = FeaturePipeline.load_years(args.valid_year, args.valid_year)
+        train_df = FeaturePipeline.load_years(
+            args.train_start, args.train_end,
+            supplement_names=supplement_names,
+        )
+        valid_df = FeaturePipeline.load_years(
+            args.valid_year, args.valid_year,
+            supplement_names=supplement_names,
+        )
         logger.info(
             "年度別ロード完了: 学習=%d行, 検証=%d行",
             len(train_df), len(valid_df),
@@ -216,6 +252,19 @@ def step_load_features(
     logger.info("旧方式 parquet からロード")
     train_df = pd.read_parquet(train_path)
     valid_df = pd.read_parquet(valid_path)
+
+    # 旧方式でもサプリメントマージ
+    if supplement_names:
+        from src.features.supplement import merge_supplements
+        train_df = merge_supplements(
+            train_df, supplement_names,
+            args.train_start, args.train_end,
+        )
+        valid_df = merge_supplements(
+            valid_df, supplement_names,
+            args.valid_year, args.valid_year,
+        )
+
     logger.info("特徴量ロード: 学習=%d行, 検証=%d行", len(train_df), len(valid_df))
     return train_df, valid_df
 
@@ -385,6 +434,44 @@ def step_eval_only(args: argparse.Namespace) -> None:
         )
 
 
+def step_build_supplements(args: argparse.Namespace) -> None:
+    """サプリメント（差分特徴量）を構築する."""
+    from src.features.supplement import (
+        build_supplement_years,
+        list_available_supplements,
+    )
+
+    available = list_available_supplements()
+    for name in args.build_supplement:
+        if name not in available:
+            logger.error(
+                "未知のサプリメント: %s（利用可能: %s）",
+                name, available,
+            )
+            continue
+
+        logger.info("=" * 60)
+        logger.info("サプリメント構築: %s", name)
+        logger.info("=" * 60)
+
+        # 学習期間
+        build_supplement_years(
+            supplement_name=name,
+            year_start=args.train_start,
+            year_end=args.train_end,
+            workers=args.workers,
+            force_rebuild=args.force_rebuild,
+        )
+        # 検証期間
+        build_supplement_years(
+            supplement_name=name,
+            year_start=args.valid_year,
+            year_end=args.valid_year,
+            workers=1,
+            force_rebuild=args.force_rebuild,
+        )
+
+
 def main() -> None:
     args = parse_args()
 
@@ -396,6 +483,14 @@ def main() -> None:
     ranking = args.ranking
 
     target_type = args.target
+
+    # サプリメント構築モード
+    if args.build_supplement:
+        step_build_supplements(args)
+        if not args.train_only and not args.eval_only and not args.build_features_only:
+            # --build-supplement のみの場合はここで終了
+            logger.info("完了!")
+            return
 
     if args.eval_only:
         # 評価・回収率シミュレーションのみ

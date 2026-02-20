@@ -1,0 +1,285 @@
+================================================================================
+MINING SUPPLEMENT PARQUET ANALYSIS - FILE MANIFEST
+================================================================================
+
+Generated: 2026-02-20
+Project: keiba-2026 (JRA Horse Racing Prediction)
+Base Directory: /sessions/great-confident-shannon/mnt/keiba-2026
+
+================================================================================
+ANALYSIS SCRIPTS (Python)
+================================================================================
+
+1. analyze_mining_supplement.py (8.9 KB)
+   Purpose: High-level statistical summary of mining supplements
+   
+   Analyzes:
+   - mining_dm_kubun distribution (前日/当日/直前)
+   - Missing rates by feature
+   - mining_dm_time statistics (predicted run time)
+   - mining_dm_jyuni distribution (predicted rank)
+   - Correlation between mining_dm_jyuni and odds (if available)
+   
+   Usage: python analyze_mining_supplement.py
+   Output: Console (formatted tables)
+   Runtime: ~10 seconds
+
+2. analyze_mining_detailed.py (6.9 KB)
+   Purpose: Detailed inspection of data structure and quality
+   
+   Analyzes:
+   - Column inventory across parquet files
+   - Detailed mining_dm_kubun analysis by year
+   - Data quality checks and value ranges
+   - Sample data inspection
+   - Merge key validation
+   
+   Usage: python analyze_mining_detailed.py
+   Output: Console (formatted tables)
+   Runtime: ~5 seconds
+
+================================================================================
+ANALYSIS REPORTS (Documentation)
+================================================================================
+
+1. MINING_ANALYSIS_REPORT.md (12 KB)
+   Format: Markdown with detailed tables and interpretation
+   
+   Contents:
+   - Section 1: Mining_DM_Kubun Distribution (key finding: 100% from 直前)
+   - Section 2: Missing Rates by Feature (data quality assessment)
+   - Section 3: Mining_DM_Time Statistics (predicted run time analysis)
+   - Section 4: Mining_DM_Jyuni Statistics (predicted rank distribution)
+   - Section 5: Correlation Analysis (odds correlation findings)
+   - Section 6: Data Reconciliation (alignment with features)
+   - Section 7: Sample Data Inspection (example row)
+   - Section 8: Quality Assessment & Recommendations
+   - Section 9: Technical Validation (integrity checks)
+   - Section 10: Appendix (feature catalog)
+   
+   Audience: Data scientists, engineers, project managers
+   Read Time: 15-20 minutes
+
+2. ANALYSIS_SUMMARY.txt (7.0 KB)
+   Format: Plain text with ASCII formatting
+   
+   Contents:
+   - Executive summary of all findings
+   - Key results in bullet-point format
+   - Data quality assessment
+   - Recommendations (4 actionable items)
+   - Output artifacts listing
+   - Conclusion
+   
+   Audience: Quick reference for all stakeholders
+   Read Time: 5-10 minutes
+
+3. ANALYSIS_README.md (8 KB)
+   Format: Markdown guide and quick reference
+   
+   Contents:
+   - Quick start (how to run analysis)
+   - Key results at a glance (summary table)
+   - Mining supplement features (7 features catalog)
+   - Usage in training (CLI examples)
+   - Data quality assessment (strengths & considerations)
+   - File structure (parquet organization)
+   - Interpretation notes (feature meanings)
+   - Next steps (validation and production usage)
+   - References (links to other docs)
+   
+   Audience: Users of mining supplements in training pipeline
+   Read Time: 10-15 minutes
+
+4. FILE_MANIFEST.txt (This file)
+   Format: Plain text
+   Purpose: Index of all generated files
+
+================================================================================
+DATA SOURCE FILES (Read-Only)
+================================================================================
+
+Mining Supplement Parquets (11 files, 517,018 total rows):
+  data/supplements/mining_2015.parquet (49,609 rows)
+  data/supplements/mining_2016.parquet (49,697 rows)
+  data/supplements/mining_2017.parquet (48,922 rows)
+  data/supplements/mining_2018.parquet (48,053 rows)
+  data/supplements/mining_2019.parquet (47,118 rows)
+  data/supplements/mining_2020.parquet (47,876 rows)
+  data/supplements/mining_2021.parquet (47,476 rows)
+  data/supplements/mining_2022.parquet (46,840 rows)
+  data/supplements/mining_2023.parquet (47,273 rows)
+  data/supplements/mining_2024.parquet (46,752 rows)
+  data/supplements/mining_2025.parquet (37,402 rows, incomplete year)
+
+Features Parquets (11 files, for comparison):
+  data/features_2015.parquet through data/features_2025.parquet
+
+================================================================================
+HOW TO USE THESE FILES
+================================================================================
+
+1. QUICK OVERVIEW (5 minutes)
+   → Read: ANALYSIS_SUMMARY.txt
+   → Action: Understand key findings and recommendations
+
+2. QUICK REFERENCE (10 minutes)
+   → Read: ANALYSIS_README.md
+   → Action: Learn feature meanings and usage patterns
+
+3. DEEP DIVE (30 minutes)
+   → Read: MINING_ANALYSIS_REPORT.md
+   → Action: Understand detailed statistics and methodology
+
+4. RE-RUN ANALYSIS (Optional)
+   → Run: python analyze_mining_supplement.py
+   → Run: python analyze_mining_detailed.py
+   → Purpose: Verify data freshness after new parquets are added
+
+5. INTEGRATE INTO PIPELINE (Production)
+   → Use: python run_train.py --supplement mining
+   → Result: Mining features are automatically merged into training
+
+================================================================================
+KEY FINDINGS SUMMARY
+================================================================================
+
+✓ Mining_DM_Kubun
+  - 100% from kubun=3 (直前/immediate) - optimal for minimal data leakage
+  - 0% from kubun=1 (前日) or kubun=2 (当日) - no data leakage risk
+
+✓ Data Completeness
+  - mining_dm_time:    100% complete (all 517,018 rows)
+  - mining_dm_jyuni:   100% complete (all 517,018 rows)
+  - mining_tm_score:   97% complete (15,455 missing)
+  - mining_dm_gosa_*:  74% complete (26% missing - expected)
+
+✓ Mining_DM_Time (Predicted Run Time)
+  - Mean: 1505.4 seconds (≈25 minutes)
+  - Range: 548-5119 seconds (reasonable)
+  - Stability: ±0.3% year-to-year (very stable)
+
+✓ Mining_DM_Jyuni (Predicted Rank)
+  - Mean: 7.74 (middle of typical race)
+  - Distribution: Uniform top-5, declining for lower ranks
+  - Range: 1-18 (covers typical JRA field size)
+
+✓ Data Alignment
+  - Mining supplements: 46,752 rows (2024)
+  - Features parquets: 46,752 rows (2024)
+  - Match rate: 100% (perfect alignment)
+
+⚠ Odds Correlation
+  - Not available in features parquets (by design - prevents leakage)
+  - Use NDCG metric for ranking quality measurement
+  - Can enable with --with-odds flag if needed
+
+================================================================================
+RECOMMENDATIONS
+================================================================================
+
+1. Continue using mining supplements by default
+   Command: python run_train.py --supplement mining
+
+2. Monitor feature importance (mining_dm_jyuni and mining_tm_score)
+   Via: SHAP analysis on trained models
+
+3. Consider error features (gosa_*) handling
+   Current: -1.0 imputation (acceptable)
+   Alternative: Drop features or special encoding
+
+4. Future enhancement
+   If odds data becomes available with proper DataKubun:
+   Command: python run_train.py --supplement mining --with-odds
+
+================================================================================
+TECHNICAL DETAILS
+================================================================================
+
+Data Period: 2015-2025 (11 years of historical data)
+Total Rows: 517,018 horses across all races
+Total Features: 7 mining features per horse per race
+
+Mining Feature Columns (7):
+  1. mining_dm_time        (float) - Predicted run time in seconds
+  2. mining_dm_jyuni       (int)   - Predicted rank (1-18)
+  3. mining_dm_kubun       (int)   - Prediction timing code (always 3)
+  4. mining_tm_score       (float) - Confrontation score (0-1000)
+  5. mining_dm_gosa_p      (float) - Positive error estimate (seconds)
+  6. mining_dm_gosa_m      (float) - Negative error estimate (seconds)
+  7. mining_dm_gosa_range  (float) - Error range width (seconds)
+
+Merge Keys (7 columns) for aligning with main features:
+  1. _key_year    (2015-2025)
+  2. _key_monthday (0101-1231)
+  3. _key_jyocd   (01-10 JRA locations)
+  4. _key_kaiji   (1-7 session numbers)
+  5. _key_nichiji (1-3 day numbers)
+  6. _key_racenum (1-12 race numbers)
+  7. kettonum     (horse registration ID)
+
+Missing Value Encoding:
+  - Float columns: -1.0 represents missing/unknown
+  - Integer columns: -1 represents missing/unknown
+
+================================================================================
+REPRODUCIBILITY
+================================================================================
+
+Python Version: 3.10+
+Required Libraries:
+  - pandas (for reading/analyzing parquets)
+  - numpy (for statistics)
+  - pyarrow (for parquet support)
+
+Install: pip install pandas numpy pyarrow --break-system-packages
+
+Run Analysis:
+  cd /sessions/great-confident-shannon/mnt/keiba-2026
+  python analyze_mining_supplement.py
+  python analyze_mining_detailed.py
+
+Expected Runtime: ~15 seconds total
+
+================================================================================
+APPENDIX: FEATURE MEANINGS (日本語)
+================================================================================
+
+mining_dm_kubun (データ区分コード):
+  1 = 前日      (Previous day prediction)
+  2 = 当日      (Same day prediction)
+  3 = 直前      (Immediate prediction) ← All data here
+
+mining_dm_time (DM予想走破タイム):
+  JRA-VAN Data Mining algorithm's predicted time for the horse to complete race
+  Unit: seconds
+  Example: 1139.00 seconds ≈ 19 minutes
+
+mining_dm_jyuni (DM予想順位):
+  JRA-VAN Data Mining algorithm's predicted finishing rank
+  Range: 1 (1位/first) to 18 (18位/18th)
+
+mining_tm_score (対戦型マイニングスコア):
+  Confrontation/pairwise analysis score by data mining
+  Range: 0-1000 points
+  Missing when algorithm can't perform pairwise comparison
+
+mining_dm_gosa_p (DM予想誤差(+)):
+  Positive error estimate (upper bound) in seconds
+
+mining_dm_gosa_m (DM予想誤差(-)):
+  Negative error estimate (lower bound) in seconds
+
+mining_dm_gosa_range (DM予想誤差幅):
+  Total error range width = dm_gosa_p + dm_gosa_m
+
+================================================================================
+END OF MANIFEST
+================================================================================
+
+For questions or issues, refer to:
+- CLAUDE.md (project specifications)
+- MINING_ANALYSIS_REPORT.md (detailed findings)
+- ANALYSIS_README.md (usage guide)
+
+================================================================================

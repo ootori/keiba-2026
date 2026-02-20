@@ -70,6 +70,8 @@ CATEGORICAL_FEATURES: list[str] = [
     "blood_mother_keito",
     "interval_category",
     "cross_dist_category_change",
+    # サプリメント（マイニング）
+    "mining_dm_kubun",
 ]
 
 # ---------------------------------------------------------------------------

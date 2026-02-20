@@ -15,7 +15,7 @@
 |---|---------|------|---------|---------|------|
 | 1 | 特徴量追加 | レース内相対特徴量 | ★★★★★ | 中 | ✅ 実装済 |
 | 2 | 特徴量追加 | レースラップ・ペース特徴量 | ★★★★ | 中 | 🔲 未着手 |
-| 3 | 特徴量追加 | JRA-VANデータマイニング予想の活用 | ★★★★ | 低 | 🔲 未着手 |
+| 3 | 特徴量追加 | JRA-VANデータマイニング予想の活用 | ★★★★ | 低 | ✅ 実装済（サプリメント方式） |
 | 4 | 特徴量改善 | 直近走の「重み付き」成績集計 | ★★★★ | 低 | 🔲 未着手 |
 | 5 | 特徴量追加 | 票数（投票比率）ベースの特徴量 | ★★★★ | 中 | 🔲 未着手 |
 | 6 | 特徴量追加 | 時系列オッズの変動特徴量 | ★★★ | 中 | 🔲 未着手 |
@@ -219,6 +219,20 @@ WHERE year = %(year)s AND monthday = %(monthday)s
 ### 注意点
 - `DMKubun`が1=前日、2=当日、3=直前。予測タイミングに応じて使い分ける
 - オッズと同様にデータリーク防止の観点から使用タイミングを管理する必要あり
+
+### 実装ノート（2026-02-20 実装済み）
+
+- **実装箇所:** `src/features/mining.py`（MiningFeatureExtractor）+ `src/features/supplement.py`（サプリメントシステム）
+- **サプリメント方式の採用:** メイン parquet の再構築を避けるため、差分特徴量として独立した parquet に保存し、学習/評価時にマージする方式を採用
+- **提案からの変更点:**
+  - 提案の6特徴量に加え `mining_dm_gosa_p`、`mining_dm_gosa_m` を個別カラムとして追加（計7特徴量）
+  - `mining_dm_jyuni_rank`（レース内順位）と `mining_tm_score_rank` は相対特徴量システムに委譲可能なため、Extractor には含めていない
+  - n_mining / n_taisengata_mining はDB依存の横持ちカラム名のため、スキーマから動的検出して縦持ちに変換
+- **使い方:**
+  - `python run_train.py --build-supplement mining` でサプリメント構築
+  - `python run_train.py --train-only --supplement mining` でマージして学習
+  - `python run_train.py --eval-only --supplement mining` でマージして評価
+- **テスト:** `tests/test_mining_supplement.py`（16テスト）
 
 ---
 

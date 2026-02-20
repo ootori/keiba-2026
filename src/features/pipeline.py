@@ -277,15 +277,21 @@ class FeaturePipeline:
     def load_years(
         year_start: str,
         year_end: str,
+        supplement_names: list[str] | None = None,
     ) -> pd.DataFrame:
         """年度別 parquet を結合してロードする.
+
+        supplement_names が指定された場合、サプリメント parquet も
+        自動的にマージして返す。
 
         Args:
             year_start: 開始年
             year_end: 終了年
+            supplement_names: マージするサプリメント名のリスト
+                （例: ["mining"]）。None の場合はメインのみ。
 
         Returns:
-            全年度を結合した DataFrame
+            全年度を結合した DataFrame（サプリメントマージ済み）
 
         Raises:
             FileNotFoundError: いずれかの年度の parquet が見つからない場合
@@ -313,6 +319,14 @@ class FeaturePipeline:
             "年度別ロード: %s〜%s → %d行",
             year_start, year_end, len(result),
         )
+
+        # サプリメントのマージ
+        if supplement_names:
+            from src.features.supplement import merge_supplements
+            result = merge_supplements(
+                result, supplement_names, year_start, year_end,
+            )
+
         return result
 
     # ------------------------------------------------------------------

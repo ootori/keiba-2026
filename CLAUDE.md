@@ -44,6 +44,8 @@ everydb2/
 │   │   ├── training.py               # 調教データ（カテゴリ12）
 │   │   ├── bloodline.py              # 血統（カテゴリ13）
 │   │   ├── odds.py                   # オッズ・人気（カテゴリ15）
+│   │   ├── mining.py                # JRA-VANデータマイニング予想（カテゴリ18: サプリメント）
+│   │   ├── supplement.py            # 差分特徴量（サプリメント）パイプライン
 │   │   └── pipeline.py              # 特徴量パイプライン統合+クロス特徴量（カテゴリ16）
 │   ├── model/
 │   │   ├── __init__.py
@@ -58,8 +60,12 @@ everydb2/
 │   └── exploration.ipynb             # データ探索用ノートブック
 ├── models/                           # 学習済みモデル保存先（*.txt, *_features.txt, *_meta.json）
 ├── data/                             # 中間データキャッシュ（*.parquet, base_time_table.csv）
+│   └── supplements/                  # サプリメント（差分特徴量）保存先
+│       ├── mining_2024.parquet       #   マイニング特徴量（年度別）
+│       └── ...
 └── tests/
-    └── test_features.py              # 30テスト（pytest）
+    ├── test_features.py              # 30テスト（pytest）
+    └── test_mining_supplement.py     # マイニング・サプリメントテスト（16テスト）
 ```
 
 ## データベース接続
@@ -155,8 +161,9 @@ everydb2/
 15. **オッズ(7):** 単勝オッズ, 複勝オッズ, 人気順（※予測タイミング依存）
 16. **クロス特徴量(8):** 距離変更, 芝ダ変更, クラス変更, 斤量/体重比
 17. **レース内相対特徴量(36):** 主要能力指標のレース内Zスコア・ランク（血統4指標追加）
+18. **マイニング予想(7):** DM予想タイム, DM予想順位, DM誤差幅, 対戦型スコア（サプリメント）
 
-合計 **約173特徴量**（詳細は `docs/feature_design.md` 参照）
+合計 **約180特徴量**（詳細は `docs/feature_design.md` 参照）
 
 ## コーディング規約
 
@@ -238,6 +245,28 @@ python run_train.py --target win --train-only --model-name win_model
 
 # 1着予測モデルの評価のみ（メタデータからtarget_type=winが自動検出される）
 python run_train.py --eval-only --model-name win_model
+
+# === サプリメント（差分特徴量）===
+# マイニング特徴量をサプリメントとして構築（メインparquetの再構築不要）
+python run_train.py --build-supplement mining
+
+# 4並列でサプリメント構築
+python run_train.py --build-supplement mining --workers 4
+
+# 既存サプリメントを再構築
+python run_train.py --build-supplement mining --force-rebuild
+
+# マイニング特徴量をマージして学習（既存parquet + サプリメント）
+python run_train.py --train-only --supplement mining
+
+# マイニング特徴量をマージして評価
+python run_train.py --eval-only --supplement mining
+
+# フル実行 + マイニングサプリメント
+python run_train.py --supplement mining
+
+# 複数サプリメントを同時にマージ（将来拡張用）
+python run_train.py --train-only --supplement mining pace
 ```
 
 ## 特徴量の年度別保存と並列構築
@@ -254,6 +283,10 @@ data/
 ├── features_2015.parquet    # 年度別（現行方式）
 ├── features_2016.parquet
 ├── ...
+├── supplements/             # サプリメント（差分特徴量）
+│   ├── mining_2015.parquet  #   マイニング特徴量
+│   ├── mining_2016.parquet
+│   └── ...
 ├── features_2025.parquet
 ├── train_features.parquet   # 旧方式（後方互換、--train-only/--eval-only のフォールバック用）
 └── valid_features.parquet   # 旧方式
@@ -266,8 +299,52 @@ data/
 
 **API:**
 - `FeaturePipeline.build_years(year_start, year_end, workers=N)` — 並列構築
-- `FeaturePipeline.load_years(year_start, year_end)` — 年度別 parquet を結合ロード
+- `FeaturePipeline.load_years(year_start, year_end, supplement_names=["mining"])` — 年度別 parquet を結合ロード（サプリメントマージ対応）
 - `FeaturePipeline.build_year(year)` — 単年度構築（直列用）
+
+## サプリメント（差分特徴量）システム
+
+新しい特徴量を追加する際、メインの parquet を全年度再構築する必要がないよう、
+差分特徴量（サプリメント）として別ファイルに保存し、学習/評価時にマージする仕組み。
+
+**メリット:**
+- メイン parquet の再構築不要（構築に数時間かかる場合でも、サプリメントは独立に高速構築）
+- 複数のサプリメントを自由に組み合わせて実験可能
+- サプリメントの追加・削除がメインパイプラインに影響しない
+
+**仕組み:**
+- サプリメントは `data/supplements/{name}_{year}.parquet` に保存
+- 各 parquet はレースキー + kettonum をキーとして持つ
+- `load_years()` や `merge_supplements()` で自動的に left join
+- 同名カラムがある場合はサプリメント側で上書き
+
+**サプリメント登録簿（supplement.py）:**
+- `mining`: JRA-VANデータマイニング予想特徴量（MiningFeatureExtractor）
+- 新しいサプリメントを追加するには `_get_registry()` に登録
+
+**API:**
+- `build_supplement_years(name, year_start, year_end, workers=N)` — サプリメント構築
+- `load_supplement_years(name, year_start, year_end)` — サプリメントロード
+- `merge_supplements(main_df, names, year_start, year_end)` — メインDFにマージ
+
+### マイニング特徴量（カテゴリ18）
+
+JRA-VANが提供するデータマイニング予想を特徴量として活用する。
+
+| 特徴量名 | 説明 | データソース |
+|---------|------|------------|
+| `mining_dm_time` | DM予想走破タイム（秒） | n_uma_race.dmtime / n_mining |
+| `mining_dm_jyuni` | DM予想順位 | n_uma_race.dmjyuni |
+| `mining_dm_gosa_range` | DM予想誤差幅（信頼度指標） | dmgosap + dmgosam |
+| `mining_dm_gosa_p` | DM予想誤差（+側） | n_uma_race.dmgosap |
+| `mining_dm_gosa_m` | DM予想誤差（-側） | n_uma_race.dmgosam |
+| `mining_dm_kubun` | DM区分（1=前日, 2=当日, 3=直前） | n_uma_race.dmkubun |
+| `mining_tm_score` | 対戦型マイニングスコア（0〜100） | n_taisengata_mining |
+
+**注意:**
+- DMKubun が 1=前日、2=当日、3=直前。データリーク防止の観点からタイミングに注意
+- n_uma_race の DM カラムを優先取得し、n_mining テーブルで補完
+- n_mining / n_taisengata_mining は横持ちデータのため、スキーマから動的に縦持ちに変換
 
 ## LightGBM categorical_feature の注意
 
