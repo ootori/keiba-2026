@@ -57,9 +57,11 @@ _MERGE_KEYS = [f"_key_{c}" for c in RACE_KEY_COLS] + ["kettonum"]
 def _get_registry() -> dict[str, type[FeatureExtractor]]:
     """遅延インポートでサプリメント登録簿を返す."""
     from src.features.mining import MiningFeatureExtractor
+    from src.features.bms_detail import BMSDetailFeatureExtractor
 
     return {
         "mining": MiningFeatureExtractor,
+        "bms_detail": BMSDetailFeatureExtractor,
     }
 
 
