@@ -122,8 +122,10 @@ everydb2/
 ### 問題設定
 - **入力:** 1レースの全出走馬の特徴量
 - **出力（二値分類モード）:** 各馬の3着以内確率（LightGBMの二値分類）
+- **出力（二値分類・単勝モード）:** 各馬の1着確率（`--target win` 指定時）
 - **出力（LambdaRankモード）:** 各馬のランキングスコア（高いほど上位予測）
-- **目的変数（二値分類）:** `target` — `KakuteiJyuni` が 1, 2, 3 なら 1、それ以外は 0
+- **目的変数（二値分類・top3）:** `target` — `KakuteiJyuni` が 1, 2, 3 なら 1、それ以外は 0
+- **目的変数（二値分類・win）:** `target_win` — `KakuteiJyuni` が 1 なら 1、それ以外は 0
 - **目的変数（LambdaRank）:** `target_relevance` — 関連度スコア（1着=5, 2着=4, 3着=3, 4着=2, 5着=1, 6着以下=0）
 - **データリーク防止:** 特徴量は必ず「当該レースより過去のデータ」のみで構成
 
@@ -226,6 +228,16 @@ python run_train.py --ranking --train-only --model-name ranking_model
 
 # LambdaRank モデルの評価のみ（メタデータからranking=Trueが自動検出される）
 python run_train.py --eval-only --model-name ranking_model
+
+# 1着予測モデルで学習（value_bet戦略向け）
+# ※parquetにtarget_winカラムが必要（--force-rebuildで再構築）
+python run_train.py --target win --model-name win_model
+
+# 1着予測モデル + 既存特徴量から学習のみ
+python run_train.py --target win --train-only --model-name win_model
+
+# 1着予測モデルの評価のみ（メタデータからtarget_type=winが自動検出される）
+python run_train.py --eval-only --model-name win_model
 ```
 
 ## 特徴量の年度別保存と並列構築
@@ -277,9 +289,18 @@ data/
 - **特徴量の train/valid 不整合防止:** `trainer.py` では train_df と valid_df の両方に存在するカラムのみを特徴量として使用する。parquet の再構築タイミング差でカラム不整合が起きた場合はWARNINGログで通知。全特徴量を使いたい場合は `--force-rebuild` で全年度を再構築すること
 - **レース内相対特徴量のparquet依存:** 相対特徴量（`rel_*`）は `pipeline.py` の `_add_relative_features()` で構築時に計算される。既存 parquet には含まれないため、この特徴量を使うには対象年度の parquet を `--force-rebuild` で再構築する必要がある
 - **LambdaRank の parquet 依存:** LambdaRank モード（`--ranking`）には `target_relevance` と `kakuteijyuni` カラムが必要。これらは `_get_target()` で構築時に生成される。旧 parquet には含まれないため、`--force-rebuild` で再構築が必要
+- **1着予測モデルの parquet 依存:** `--target win` モードには `target_win` カラムが必要。`_get_target()` で構築時に生成される。旧 parquet には含まれないため、`--force-rebuild` で再構築が必要
+- **1着予測モデルのメタデータ:** `trainer.py` はモデル保存時に `{name}_meta.json` に `target_type` フラグ（"top3" or "win"）を記録する。`--eval-only` 実行時にこのメタデータから自動的に目的変数を検出する
 - **LambdaRank のモデルメタデータ:** `trainer.py` はモデル保存時に `{name}_meta.json` を出力し、`ranking` フラグを記録する。`--eval-only` 実行時にこのメタデータから自動的に LambdaRank モードを検出する
 - **LambdaRank の group パラメータ:** LambdaRank では同一レースの馬が連続している必要がある。`trainer.py` の `_prepare_groups()` でレースキーによるソートとグループサイズ計算を行う
-- **LambdaRank の value_bet 戦略:** LambdaRank の出力は確率ではなくランキングスコアのため、`value_bet`（期待値ベース）戦略はそのままでは確率的に意味をなさない。二値分類モデルとのアンサンブルで使うことを推奨
+- **value_bet のモデルタイプ別正規化:** `value_bet` 戦略は `target_type` と `ranking` に応じて適切な確率変換を適用する:
+  - `target_type="win"`: P(win)モデルの生出力をレース内合計で割る ratio 正規化（`_ratio_normalize_group`）
+  - `target_type="top3"` + `ranking=False`: レース内合計で割る ratio 正規化（`_ratio_normalize_group`）
+  - `ranking=True`: softmax 正規化（`_softmax_normalize_group`）
+  - ※ LightGBM の sigmoid 出力はレース内で合計 1.0 にならないため、全モデルタイプで正規化が必要
+  - ※ 旧方式の線形正規化（min-shift）は最下位馬が常に確率0になる問題があり、value_betでは使用しない
+- **value_bet のEV閾値とベット上限:** デフォルトで `ev_threshold=1.2`（マージン確保）、`max_bets_per_race=3`（ベット数膨張防止）。`value_bet_config` 辞書で設定変更可能
+- **value_bet のオッズ取得:** `value_bet` 戦略は特徴量の `odds_tan` を優先し、欠損時（オッズ特徴量未使用時）は `n_odds_tanpuku` テーブルからレース単位で単勝オッズを取得する。これにより `--with-odds` なしでも value_bet が動作する
 - **MISSING_RATE=0.0 の特徴量ごとの意味の違い:** `_add_relative_features()` では `missing_type` パラメータで欠損値処理を3パターンに分類している。rate系特徴量（勝率・複勝率等）では0.0は「0%」という正当な値であり、NaN化すると弱い馬のZスコアが平均に引き上げられ性能が低下する。新しい相対特徴量を追加する際は `missing_type` を必ず適切に設定すること（"numeric"/"rate"/"blood"）
 - **高カーディナリティIDの特徴量除外:** `blood_mother_id`（母馬繁殖登録番号）は数千種のユニーク値を持つため特徴量から削除した。カテゴリ変数では過学習し、数値変数ではID番号の大小に意味がないため分割が無意味になる。母馬の情報は `blood_mother_keito`（母系統）と `blood_mother_produce_rate`（母産駒成績）でカバーしている。同様に、LightGBMの `categorical_feature` に指定するのはユニーク数が数十〜100程度までのカラムに限定すること
 
@@ -296,7 +317,8 @@ data/
 | `top2_umatan` | 馬単 | 予測Top2の馬単を購入（1位→2位の順） |
 | `top3_sanrenpuku` | 三連複 | 予測Top3の三連複を購入 |
 | `top3_sanrentan` | 三連単 | 予測Top3の三連単を購入（1位→2位→3位の順） |
-| `value_bet` | 単勝 | 期待値ベースの購入（オッズ×確率が閾値以上） |
+| `value_bet_tansho` | 単勝 | 期待値ベースの購入（モデルタイプ別正規化後、確率×単勝オッズ≧ev_threshold の馬をEV降順で最大max_bets頭まで単勝購入。オッズは特徴量優先、欠損時はn_odds_tanpukuから取得） |
+| `value_bet_umaren` | 馬連 | 期待値ベースの購入（上記と同じEV条件で選出した馬が2頭以上の場合、全組み合わせの馬連を購入） |
 
 **n_harai からの払戻データ取得:**
 `_get_harai_data()` は6賭式（tansyo/fukusyo/umaren/umatan/sanren/sanrentan）の払戻カラムをスキーマから動的検出する。検出時は `sanrentan` を `sanren` より先に検出することで部分一致の誤マッチを防いでいる。

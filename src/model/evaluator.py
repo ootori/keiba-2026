@@ -199,6 +199,12 @@ class ModelEvaluator:
             "top3_any_hit_rate": hit_top3 / total_races,
         }
 
+    # value_bet のデフォルト設定
+    DEFAULT_VALUE_BET_CONFIG: dict[str, Any] = {
+        "ev_threshold": 1.2,       # 期待値閾値（1.0より高めでマージン確保）
+        "max_bets_per_race": 3,    # 1レースあたり最大単勝ベット数
+    }
+
     def simulate_return(
         self,
         valid_df: pd.DataFrame,
@@ -207,6 +213,8 @@ class ModelEvaluator:
         target_col: str = "target",
         strategy: str = "top1_tansho",
         ranking: bool = False,
+        target_type: str = "top3",
+        value_bet_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """回収率シミュレーションを実行する.
 
@@ -229,6 +237,10 @@ class ModelEvaluator:
                 - 'top3_sanrentan': 予測Top3の三連単を購入（1位→2位→3位）
                 - 'value_bet': 期待値ベースの購入
             ranking: LambdaRank モデルか
+            target_type: 目的変数タイプ ("top3" or "win")
+            value_bet_config: value_bet戦略の設定
+                - ev_threshold: 期待値閾値（デフォルト1.2）
+                - max_bets_per_race: 最大単勝ベット数（デフォルト3）
 
         Returns:
             回収率シミュレーション結果
@@ -247,6 +259,36 @@ class ModelEvaluator:
         if not key_cols:
             return {"error": "レースキーカラムが見つかりません"}
 
+        # value_bet_*: モデルタイプに応じた確率変換
+        # LightGBM の sigmoid 出力はレース内で合計 1.0 にならない
+        # （P(win)モデルでもレース合計は 1.0 を大きく超える）ため、
+        # 全モデルタイプで正規化が必要
+        is_value_bet = strategy in ("value_bet_tansho", "value_bet_umaren")
+        if is_value_bet:
+            if target_type == "win":
+                # P(win) モデル: ratio正規化で合計1.0にする
+                logger.info("value_bet: P(win)モデル — ratio正規化")
+                df["pred_prob"] = df.groupby(key_cols)["pred_prob"].transform(
+                    self._ratio_normalize_group
+                )
+            elif ranking:
+                # LambdaRank: softmax で確率に変換
+                logger.info("value_bet: LambdaRank — softmax正規化")
+                df["pred_prob"] = df.groupby(key_cols)["pred_prob"].transform(
+                    self._softmax_normalize_group
+                )
+            else:
+                # 二値分類 (top3): レース内合計で割って近似的 P(win) に変換
+                logger.info("value_bet: P(top3)モデル — ratio正規化")
+                df["pred_prob"] = df.groupby(key_cols)["pred_prob"].transform(
+                    self._ratio_normalize_group
+                )
+
+        # value_bet 設定の確定
+        vb_config = dict(self.DEFAULT_VALUE_BET_CONFIG)
+        if value_bet_config:
+            vb_config.update(value_bet_config)
+
         # 払戻データを取得
         harai_data = self._get_harai_data(df)
 
@@ -262,20 +304,31 @@ class ModelEvaluator:
             # レースキーの復元
             race_key_vals = dict(zip(RACE_KEY_COLS, group_key)) if isinstance(group_key, tuple) else {}
 
-            strategy_map = {
-                "top1_tansho": self._bet_top1_tansho,
-                "top1_fukusho": self._bet_top1_fukusho,
-                "top3_fukusho": self._bet_top3_fukusho,
-                "top2_umaren": self._bet_top2_umaren,
-                "top2_umatan": self._bet_top2_umatan,
-                "top3_sanrenpuku": self._bet_top3_sanrenpuku,
-                "top3_sanrentan": self._bet_top3_sanrentan,
-                "value_bet": self._bet_value,
-            }
-            bet_func = strategy_map.get(strategy)
-            if bet_func is None:
-                continue
-            result = bet_func(group, harai_data, race_key_vals)
+            if is_value_bet:
+                vb_func = (
+                    self._bet_value_tansho
+                    if strategy == "value_bet_tansho"
+                    else self._bet_value_umaren
+                )
+                result = vb_func(
+                    group, harai_data, race_key_vals,
+                    ev_threshold=vb_config["ev_threshold"],
+                    max_bets=vb_config["max_bets_per_race"],
+                )
+            else:
+                strategy_map = {
+                    "top1_tansho": self._bet_top1_tansho,
+                    "top1_fukusho": self._bet_top1_fukusho,
+                    "top3_fukusho": self._bet_top3_fukusho,
+                    "top2_umaren": self._bet_top2_umaren,
+                    "top2_umatan": self._bet_top2_umatan,
+                    "top3_sanrenpuku": self._bet_top3_sanrenpuku,
+                    "top3_sanrentan": self._bet_top3_sanrentan,
+                }
+                bet_func = strategy_map.get(strategy)
+                if bet_func is None:
+                    continue
+                result = bet_func(group, harai_data, race_key_vals)
 
             total_bet += result["bet"]
             total_return += result["return"]
@@ -294,14 +347,27 @@ class ModelEvaluator:
             "hit_rate": win_count / bet_count if bet_count > 0 else 0.0,
         }
 
-        logger.info(
-            "回収率シミュレーション [%s]: 回収率=%.1f%%, 的中率=%.1f%% (%d/%d)",
-            strategy,
-            return_rate,
-            result["hit_rate"] * 100,
-            win_count,
-            bet_count,
-        )
+        if is_value_bet:
+            logger.info(
+                "回収率シミュレーション [%s] (ev>=%.1f, max=%d): "
+                "回収率=%.1f%%, 的中率=%.1f%% (%d/%d)",
+                strategy,
+                vb_config["ev_threshold"],
+                vb_config["max_bets_per_race"],
+                return_rate,
+                result["hit_rate"] * 100,
+                win_count,
+                bet_count,
+            )
+        else:
+            logger.info(
+                "回収率シミュレーション [%s]: 回収率=%.1f%%, 的中率=%.1f%% (%d/%d)",
+                strategy,
+                return_rate,
+                result["hit_rate"] * 100,
+                win_count,
+                bet_count,
+            )
 
         return result
 
@@ -392,40 +458,127 @@ class ModelEvaluator:
             "win_count": total_wins,
         }
 
-    def _bet_value(
+    def _select_value_candidates(
+        self,
+        group: pd.DataFrame,
+        race_key: dict[str, str],
+        ev_threshold: float = 1.2,
+        max_bets: int = 3,
+    ) -> list[str]:
+        """EV条件を満たす馬番リストを返す（value_bet共通ロジック）.
+
+        予測確率 × 単勝オッズ >= ev_threshold の馬を EV 降順でソートし、
+        上位 max_bets 頭の馬番を返す。
+
+        オッズは特徴量データ（odds_tan）を優先し、
+        欠損時は n_odds_tanpuku テーブルから取得する。
+        """
+        odds_from_db: dict[str, float] | None = None
+        has_odds_col = "odds_tan" in group.columns
+
+        candidates: list[tuple[str, float]] = []  # (umaban, ev)
+
+        for _, row in group.iterrows():
+            pred_prob = row.get("pred_prob", 0)
+            umaban = (
+                self._format_umaban(row.get("post_umaban", ""))
+                if "post_umaban" in group.columns
+                else ""
+            )
+            if not umaban:
+                continue
+
+            odds_tan = 0.0
+            if has_odds_col:
+                try:
+                    val = float(row.get("odds_tan", 0))
+                    if val > 0:
+                        odds_tan = val
+                except (ValueError, TypeError):
+                    pass
+
+            if odds_tan <= 0:
+                if odds_from_db is None:
+                    odds_from_db = self._get_odds_from_db(race_key)
+                odds_tan = odds_from_db.get(umaban, 0.0)
+
+            if odds_tan > 0:
+                ev = pred_prob * odds_tan
+                if ev >= ev_threshold:
+                    candidates.append((umaban, ev))
+
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        return [c[0] for c in candidates[:max_bets]]
+
+    def _bet_value_tansho(
         self,
         group: pd.DataFrame,
         harai_data: dict,
         race_key: dict[str, str],
+        ev_threshold: float = 1.2,
+        max_bets: int = 3,
     ) -> dict[str, int]:
-        """期待値ベースで購入する.
+        """期待値ベースで単勝を購入する.
 
-        予測確率 × オッズ > 1.2 の馬の複勝を購入。
+        EV条件を満たす馬の単勝のみを購入する。
         """
+        qualified = self._select_value_candidates(
+            group, race_key, ev_threshold, max_bets,
+        )
         race_harai = harai_data.get(self._race_key_str(race_key), {})
-        fukusho = race_harai.get("fukusho", {})
+        tansho = race_harai.get("tansho", {})
 
         total_bet = 0
         total_payout = 0
         total_bets = 0
         total_wins = 0
 
-        for _, row in group.iterrows():
-            pred_prob = row.get("pred_prob", 0)
-            odds_fuku = row.get("odds_fuku_low", 0)
-            try:
-                odds_fuku = float(odds_fuku) if odds_fuku and odds_fuku > 0 else 0
-            except (ValueError, TypeError):
-                odds_fuku = 0
+        for umaban in qualified:
+            total_bet += 100
+            total_bets += 1
+            if umaban in tansho:
+                total_payout += tansho[umaban]
+                total_wins += 1
 
-            if odds_fuku > 0 and pred_prob * odds_fuku > 1.2:
-                umaban = self._format_umaban(row.get("post_umaban", "")) if "post_umaban" in group.columns else ""
-                if not umaban:
-                    continue
+        return {
+            "bet": total_bet,
+            "return": total_payout,
+            "bet_count": total_bets,
+            "win_count": total_wins,
+        }
+
+    def _bet_value_umaren(
+        self,
+        group: pd.DataFrame,
+        harai_data: dict,
+        race_key: dict[str, str],
+        ev_threshold: float = 1.2,
+        max_bets: int = 3,
+    ) -> dict[str, int]:
+        """期待値ベースで馬連を購入する.
+
+        EV条件を満たす馬が2頭以上の場合、全組み合わせの馬連を購入する。
+        """
+        qualified = self._select_value_candidates(
+            group, race_key, ev_threshold, max_bets,
+        )
+        race_harai = harai_data.get(self._race_key_str(race_key), {})
+        umaren_harai = race_harai.get("umaren", {})
+
+        total_bet = 0
+        total_payout = 0
+        total_bets = 0
+        total_wins = 0
+
+        if len(qualified) >= 2:
+            from itertools import combinations
+
+            for uma1, uma2 in combinations(qualified, 2):
+                kumi = self._make_kumi_umaren(uma1, uma2)
                 total_bet += 100
                 total_bets += 1
-                if umaban in fukusho:
-                    total_payout += fukusho[umaban]
+                if kumi in umaren_harai:
+                    total_payout += umaren_harai[kumi]
                     total_wins += 1
 
         return {
@@ -434,6 +587,45 @@ class ModelEvaluator:
             "bet_count": total_bets,
             "win_count": total_wins,
         }
+
+    def _get_odds_from_db(
+        self,
+        race_key: dict[str, str],
+    ) -> dict[str, float]:
+        """n_odds_tanpuku から単勝オッズを取得する.
+
+        特徴量にオッズが含まれていない場合のフォールバック。
+        馬番（2桁ゼロ埋め） → 単勝オッズ のマッピングを返す。
+
+        Returns:
+            umaban(ゼロ埋め) → 単勝オッズ の辞書
+        """
+        sql = """
+        SELECT umaban, tanodds
+        FROM n_odds_tanpuku
+        WHERE year = %(year)s AND monthday = %(monthday)s
+          AND jyocd = %(jyocd)s AND kaiji = %(kaiji)s
+          AND nichiji = %(nichiji)s AND racenum = %(racenum)s
+        """
+        try:
+            df = query_df(sql, race_key)
+        except Exception:
+            logger.debug("オッズDB取得失敗: race_key=%s", race_key)
+            return {}
+
+        result: dict[str, float] = {}
+        for _, row in df.iterrows():
+            umaban = self._format_umaban(str(row.get("umaban", "")).strip())
+            odds_str = str(row.get("tanodds", "")).strip()
+            if not odds_str or odds_str == "0000":
+                continue
+            try:
+                odds_val = int(odds_str) / 10.0
+                if odds_val > 0:
+                    result[umaban] = odds_val
+            except (ValueError, TypeError):
+                continue
+        return result
 
     # ------------------------------------------------------------------
     # 払戻データ
@@ -686,6 +878,48 @@ class ModelEvaluator:
             result[rk] = race_data
 
         return result
+
+    @staticmethod
+    def _linear_normalize_group(scores: pd.Series) -> pd.Series:
+        """レース内のスコアを線形正規化して確率に変換する.
+
+        LambdaRank のスコアを確率として扱うための変換。
+        最小値を0にシフトしてから合計で割ることで、
+        スコア差の比率をそのまま保持した確率分布を生成する。
+
+        ※ value_bet では使用しない（最下位馬が常に0になる問題あり）。
+        """
+        shifted = scores - scores.min()
+        total = shifted.sum()
+        if total > 0:
+            return shifted / total
+        # 全馬同スコアの場合は均等確率
+        return pd.Series(1.0 / len(scores), index=scores.index)
+
+    @staticmethod
+    def _ratio_normalize_group(scores: pd.Series) -> pd.Series:
+        """レース内合計で割って確率に変換する（二値分類 top3 用）.
+
+        P(top3) の比率をそのまま保持して合計1.0にする。
+        min-shift を行わないため、全馬に正の確率が残る。
+        """
+        total = scores.sum()
+        if total > 0:
+            return scores / total
+        return pd.Series(1.0 / len(scores), index=scores.index)
+
+    @staticmethod
+    def _softmax_normalize_group(scores: pd.Series) -> pd.Series:
+        """Softmax でスコアを確率に変換する（LambdaRank 用）.
+
+        LambdaRank の出力は任意のスケールのスコアであるため、
+        softmax で確率分布に変換する。スコア差の指数比を保持する。
+        """
+        exp_scores = np.exp(scores - scores.max())  # オーバーフロー防止
+        total = exp_scores.sum()
+        if total > 0:
+            return exp_scores / total
+        return pd.Series(1.0 / len(scores), index=scores.index)
 
     @staticmethod
     def _format_umaban(val) -> str:

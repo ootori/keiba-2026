@@ -438,6 +438,7 @@ class FeaturePipeline:
         Returns:
             kettonum をインデックスとした DataFrame:
                 - target: 3着以内=1, 他=0（二値分類用）
+                - target_win: 1着=1, 他=0（単勝予測用）
                 - target_relevance: LambdaRank用関連度スコア
                     1着=5, 2着=4, 3着=3, 4着=2, 5着=1, 6着以下=0
                 - kakuteijyuni: 確定着順（生値）
@@ -446,6 +447,7 @@ class FeaturePipeline:
         SELECT kettonum,
             CAST(kakuteijyuni AS integer) AS kakuteijyuni,
             CASE WHEN CAST(kakuteijyuni AS integer) <= 3 THEN 1 ELSE 0 END AS target,
+            CASE WHEN CAST(kakuteijyuni AS integer) = 1 THEN 1 ELSE 0 END AS target_win,
             CASE
                 WHEN CAST(kakuteijyuni AS integer) = 1 THEN 5
                 WHEN CAST(kakuteijyuni AS integer) = 2 THEN 4
@@ -463,10 +465,10 @@ class FeaturePipeline:
         df = query_df(sql, race_key)
         if df.empty:
             return pd.DataFrame(
-                columns=["target", "target_relevance", "kakuteijyuni"]
+                columns=["target", "target_win", "target_relevance", "kakuteijyuni"]
             )
         return df.set_index("kettonum")[
-            ["target", "target_relevance", "kakuteijyuni"]
+            ["target", "target_win", "target_relevance", "kakuteijyuni"]
         ]
 
     # ------------------------------------------------------------------

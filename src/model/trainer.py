@@ -55,6 +55,7 @@ class ModelTrainer:
         self.early_stopping_rounds = early_stopping_rounds
         self.model: lgb.Booster | None = None
         self.feature_columns: list[str] = []
+        self.target_type: str = "top3"
 
     def train(
         self,
@@ -283,6 +284,7 @@ class ModelTrainer:
         return {
             target_col,
             "target",
+            "target_win",
             "target_relevance",
             "kakuteijyuni",
             "kettonum",
@@ -323,15 +325,21 @@ class ModelTrainer:
     # 保存 / ロード
     # ------------------------------------------------------------------
 
-    def save_model(self, name: str = "model") -> Path:
+    def save_model(
+        self,
+        name: str = "model",
+        target_type: str = "top3",
+    ) -> Path:
         """モデルを保存する.
 
         Args:
             name: ファイル名プレフィクス
+            target_type: 目的変数種別 ("top3" or "win")
 
         Returns:
             保存先パス
         """
+        self.target_type = target_type
         if self.model is None:
             raise RuntimeError("モデルが学習されていません")
 
@@ -351,6 +359,7 @@ class ModelTrainer:
         meta_path = MODEL_DIR / f"{name}_meta.json"
         meta = {
             "ranking": self.ranking,
+            "target_type": self.target_type,
             "objective": self.params.get("objective", "binary"),
             "num_features": len(self.feature_columns),
         }
@@ -383,11 +392,13 @@ class ModelTrainer:
             with open(meta_path) as f:
                 meta = json.load(f)
             self.ranking = meta.get("ranking", False)
+            self.target_type = meta.get("target_type", "top3")
             logger.info(
-                "モデルロード: %s (%d特徴量, ranking=%s)",
+                "モデルロード: %s (%d特徴量, ranking=%s, target=%s)",
                 model_path,
                 len(self.feature_columns),
                 self.ranking,
+                self.target_type,
             )
         else:
             logger.info(

@@ -123,6 +123,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="既存の年度別 parquet を無視して全年度を再構築",
     )
+    parser.add_argument(
+        "--target",
+        choices=["top3", "win"],
+        default="top3",
+        help="目的変数: top3=3着以内（デフォルト）, win=1着",
+    )
     return parser.parse_args()
 
 
@@ -219,16 +225,29 @@ def step_train(
     valid_df: pd.DataFrame,
     model_name: str,
     ranking: bool = False,
+    target_type: str = "top3",
 ) -> None:
-    """Step 2: モデル学習 + 評価."""
+    """Step 2: モデル学習 + 評価.
+
+    Args:
+        target_type: "top3"=3着以内, "win"=1着
+    """
+    # 目的変数カラムの決定
+    target_col = "target_win" if target_type == "win" else "target"
+
     logger.info("=" * 60)
     mode_str = "LambdaRank" if ranking else "二値分類"
-    logger.info("Step 2: モデル学習（%s）", mode_str)
+    target_desc = "1着" if target_type == "win" else "3着以内"
+    logger.info("Step 2: モデル学習（%s, 目的変数=%s）", mode_str, target_desc)
     logger.info("=" * 60)
 
     # target カラムが存在するか確認
-    if "target" not in train_df.columns:
-        logger.error("target カラムが見つかりません")
+    if target_col not in train_df.columns:
+        logger.error(
+            "%s カラムが見つかりません。"
+            " parquet を --force-rebuild で再構築してください。",
+            target_col,
+        )
         return
 
     # LambdaRank の場合は target_relevance が必要
@@ -240,7 +259,7 @@ def step_train(
         return
 
     # NaN のある行を除外
-    drop_cols = ["target"]
+    drop_cols = [target_col]
     if ranking:
         drop_cols.append("target_relevance")
     train_df = train_df.dropna(subset=drop_cols).copy()
@@ -248,10 +267,10 @@ def step_train(
 
     # 学習
     trainer = ModelTrainer(ranking=ranking)
-    model = trainer.train(train_df, valid_df)
+    model = trainer.train(train_df, valid_df, target_col=target_col)
 
     # 保存
-    trainer.save_model(name=model_name)
+    trainer.save_model(name=model_name, target_type=target_type)
 
     # 特徴量重要度
     logger.info("=" * 60)
@@ -268,7 +287,8 @@ def step_train(
     logger.info("=" * 60)
     evaluator = ModelEvaluator()
     metrics = evaluator.evaluate(
-        model, valid_df, trainer.feature_columns, ranking=ranking
+        model, valid_df, trainer.feature_columns,
+        target_col=target_col, ranking=ranking,
     )
 
     logger.info("評価結果:")
@@ -285,11 +305,12 @@ def step_train(
     for strategy in [
         "top1_tansho", "top1_fukusho", "top3_fukusho",
         "top2_umaren", "top2_umatan", "top3_sanrenpuku", "top3_sanrentan",
-        "value_bet",
+        "value_bet_tansho", "value_bet_umaren",
     ]:
         result = evaluator.simulate_return(
             valid_df, trainer.feature_columns, model,
             strategy=strategy, ranking=ranking,
+            target_type=target_type,
         )
         logger.info(
             "  [%s] 回収率: %.1f%%, 的中率: %.1f%% (%d/%d)",
@@ -305,24 +326,32 @@ def step_eval_only(args: argparse.Namespace) -> None:
     """Step 4-5 のみ: 既存モデル+特徴量で評価・回収率シミュレーションを実行."""
     # 特徴量ロード
     _, valid_df = step_load_features(args)
-    valid_df = valid_df.dropna(subset=["target"]).copy()
 
     # モデルロード
     trainer = ModelTrainer()
     model = trainer.load_model(name=args.model_name)
     ranking = trainer.ranking  # メタデータから復元
+    target_type = trainer.target_type  # メタデータから復元
 
     if args.ranking:
         ranking = True  # CLI で明示指定された場合を優先
+    if args.target != "top3":
+        target_type = args.target  # CLI で明示指定された場合を優先
+
+    # 目的変数カラムの決定
+    target_col = "target_win" if target_type == "win" else "target"
+    valid_df = valid_df.dropna(subset=[target_col]).copy()
 
     # 評価
     logger.info("=" * 60)
     mode_str = "LambdaRank" if ranking else "二値分類"
-    logger.info("Step 4: モデル評価（%s）", mode_str)
+    target_desc = "1着" if target_type == "win" else "3着以内"
+    logger.info("Step 4: モデル評価（%s, 目的変数=%s）", mode_str, target_desc)
     logger.info("=" * 60)
     evaluator = ModelEvaluator()
     metrics = evaluator.evaluate(
-        model, valid_df, trainer.feature_columns, ranking=ranking
+        model, valid_df, trainer.feature_columns,
+        target_col=target_col, ranking=ranking,
     )
 
     logger.info("評価結果:")
@@ -339,11 +368,12 @@ def step_eval_only(args: argparse.Namespace) -> None:
     for strategy in [
         "top1_tansho", "top1_fukusho", "top3_fukusho",
         "top2_umaren", "top2_umatan", "top3_sanrenpuku", "top3_sanrentan",
-        "value_bet",
+        "value_bet_tansho", "value_bet_umaren",
     ]:
         result = evaluator.simulate_return(
             valid_df, trainer.feature_columns, model,
             strategy=strategy, ranking=ranking,
+            target_type=target_type,
         )
         logger.info(
             "  [%s] 回収率: %.1f%%, 的中率: %.1f%% (%d/%d)",
@@ -365,6 +395,8 @@ def main() -> None:
     include_odds = args.with_odds  # --with-odds指定時のみオッズを含める
     ranking = args.ranking
 
+    target_type = args.target
+
     if args.eval_only:
         # 評価・回収率シミュレーションのみ
         step_eval_only(args)
@@ -372,7 +404,10 @@ def main() -> None:
     elif args.train_only:
         # 既存特徴量からの学習のみ
         train_df, valid_df = step_load_features(args)
-        step_train(train_df, valid_df, args.model_name, ranking=ranking)
+        step_train(
+            train_df, valid_df, args.model_name,
+            ranking=ranking, target_type=target_type,
+        )
 
     elif args.build_features_only:
         # 特徴量構築のみ
@@ -381,7 +416,10 @@ def main() -> None:
     else:
         # フル実行: 特徴量構築 → 学習 → 評価
         train_df, valid_df = step_build_features(args, include_odds)
-        step_train(train_df, valid_df, args.model_name, ranking=ranking)
+        step_train(
+            train_df, valid_df, args.model_name,
+            ranking=ranking, target_type=target_type,
+        )
 
     logger.info("完了!")
 
