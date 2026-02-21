@@ -121,14 +121,14 @@ def _format_ev_info(
         )
         ev = pred_prob * corrected_odds
 
-        marker = " *" if ev >= 1.2 else ""
+        marker = " *" if ev >= 1.1 and pred_prob >= 0.025 else ""
         lines.append(
             f"{umaban:>4s}  {raw_odds:>6.1f}  {corrected_odds:>6.1f}  "
             f"{pred_prob * 100:>4.1f}%  {ev:>5.2f}{marker}"
         )
 
     lines.append("")
-    lines.append("* = EV >= 1.2（value_bet候補）")
+    lines.append("* = EV >= 1.1 かつ 予想勝率 >= 2.5%（value_bet候補）")
     return "\n".join(lines)
 
 

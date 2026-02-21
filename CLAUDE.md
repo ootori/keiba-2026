@@ -457,7 +457,7 @@ father側の6条件別特徴量に対し、BMS側は2つのみという非対称
   - `ranking=True`: softmax 正規化（`_softmax_normalize_group`）
   - ※ LightGBM の sigmoid 出力はレース内で合計 1.0 にならないため、全モデルタイプで正規化が必要
   - ※ 旧方式の線形正規化（min-shift）は最下位馬が常に確率0になる問題があり、value_betでは使用しない
-- **value_bet のEV閾値とベット上限:** デフォルトで `ev_threshold=1.2`（マージン確保）、`max_bets_per_race=3`（ベット数膨張防止）。`value_bet_config` 辞書で設定変更可能
+- **value_bet のEV閾値とベット上限:** デフォルトで `ev_threshold=1.1`、`max_bets_per_race=2`、`min_pred_prob=0.025`（予想勝率2.5%未満は除外）。候補は予測勝率降順でソート（勝率が高い馬を優先）。`value_bet_config` 辞書で設定変更可能
 - **value_bet のオッズ取得:** `value_bet` 戦略は特徴量の `odds_tan` を優先し、欠損時（オッズ特徴量未使用時）は `n_odds_tanpuku` テーブルからレース単位で単勝オッズを取得する。これにより `--with-odds` なしでも value_bet が動作する
 - **MISSING_RATE=0.0 の特徴量ごとの意味の違い:** `_add_relative_features()` では `missing_type` パラメータで欠損値処理を3パターンに分類している。rate系特徴量（勝率・複勝率等）では0.0は「0%」という正当な値であり、NaN化すると弱い馬のZスコアが平均に引き上げられ性能が低下する。新しい相対特徴量を追加する際は `missing_type` を必ず適切に設定すること（"numeric"/"rate"/"blood"）
 - **サプリメント特徴量の欠損値戦略:** `bms_detail` サプリメントでは `MISSING_RATE=0.0` ではなく `NaN`（LightGBMネイティブ欠損）を使用している。率系特徴量（複勝率）で「サンプル数不足（MIN_SAMPLES未満）でデータなし」と「本当に複勝率0%」を区別するため。新しいサプリメントで率系特徴量を追加する場合も、同様に最小サンプル数閾値 + NaN 方式を推奨
@@ -477,8 +477,8 @@ father側の6条件別特徴量に対し、BMS側は2つのみという非対称
 | `top2_umatan` | 馬単 | 予測Top2の馬単を購入（1位→2位の順） |
 | `top3_sanrenpuku` | 三連複 | 予測Top3の三連複を購入 |
 | `top3_sanrentan` | 三連単 | 予測Top3の三連単を購入（1位→2位→3位の順） |
-| `value_bet_tansho` | 単勝 | 期待値ベースの購入（モデルタイプ別正規化後、確率×単勝オッズ≧ev_threshold の馬をEV降順で最大max_bets頭まで単勝購入。オッズは特徴量優先、欠損時はn_odds_tanpukuから取得） |
-| `value_bet_umaren` | 馬連 | 期待値ベースの購入（上記と同じEV条件で選出した馬が2頭以上の場合、全組み合わせの馬連を購入） |
+| `value_bet_tansho` | 単勝 | 期待値ベースの購入（モデルタイプ別正規化後、確率×単勝オッズ≧ev_threshold かつ予測勝率≧min_pred_prob の馬を予測勝率降順で最大max_bets頭まで単勝購入。オッズは特徴量優先、欠損時はn_odds_tanpukuから取得） |
+| `value_bet_umaren` | 馬連 | 期待値ベースの購入（上記と同じ条件で選出した馬が2頭以上の場合、全組み合わせの馬連を購入） |
 
 **n_harai からの払戻データ取得:**
 `_get_harai_data()` は6賭式（tansyo/fukusyo/umaren/umatan/sanren/sanrentan）の払戻カラムをスキーマから動的検出する。検出時は `sanrentan` を `sanren` より先に検出することで部分一致の誤マッチを防いでいる。

@@ -201,8 +201,9 @@ class ModelEvaluator:
 
     # value_bet のデフォルト設定
     DEFAULT_VALUE_BET_CONFIG: dict[str, Any] = {
-        "ev_threshold": 1.2,       # 期待値閾値（1.0より高めでマージン確保）
-        "max_bets_per_race": 3,    # 1レースあたり最大単勝ベット数
+        "ev_threshold": 1.1,       # 期待値閾値
+        "max_bets_per_race": 2,    # 1レースあたり最大単勝ベット数
+        "min_pred_prob": 0.025,    # 最低予想勝率（2.5%未満は除外）
     }
 
     def simulate_return(
@@ -240,8 +241,9 @@ class ModelEvaluator:
             ranking: LambdaRank モデルか
             target_type: 目的変数タイプ ("top3" or "win")
             value_bet_config: value_bet戦略の設定
-                - ev_threshold: 期待値閾値（デフォルト1.2）
-                - max_bets_per_race: 最大単勝ベット数（デフォルト3）
+                - ev_threshold: 期待値閾値（デフォルト1.1）
+                - max_bets_per_race: 最大ベット数（デフォルト2）
+                - min_pred_prob: 最低予想勝率（デフォルト0.025=2.5%）
             odds_correction_config: オッズ歪み補正設定（value_bet時のみ有効）
                 - enabled: 補正を有効化するか
                 - rules: 補正ルール辞書
@@ -325,6 +327,7 @@ class ModelEvaluator:
                     ev_threshold=vb_config["ev_threshold"],
                     max_bets=vb_config["max_bets_per_race"],
                     odds_correction_config=odds_correction_config,
+                    min_pred_prob=vb_config.get("min_pred_prob", 0.025),
                 )
             else:
                 strategy_map = {
@@ -360,10 +363,11 @@ class ModelEvaluator:
 
         if is_value_bet:
             logger.info(
-                "回収率シミュレーション [%s] (ev>=%.1f, max=%d): "
+                "回収率シミュレーション [%s] (ev>=%.1f, min_prob>=%.1f%%, max=%d): "
                 "回収率=%.1f%%, 的中率=%.1f%% (%d/%d)",
                 strategy,
                 vb_config["ev_threshold"],
+                vb_config.get("min_pred_prob", 0.025) * 100,
                 vb_config["max_bets_per_race"],
                 return_rate,
                 result["hit_rate"] * 100,
@@ -473,13 +477,15 @@ class ModelEvaluator:
         self,
         group: pd.DataFrame,
         race_key: dict[str, str],
-        ev_threshold: float = 1.2,
-        max_bets: int = 3,
+        ev_threshold: float = 1.1,
+        max_bets: int = 2,
         odds_correction_config: dict[str, Any] | None = None,
+        min_pred_prob: float = 0.025,
     ) -> list[str]:
         """EV条件を満たす馬番リストを返す（value_bet共通ロジック）.
 
-        予測確率 × 単勝オッズ >= ev_threshold の馬を EV 降順でソートし、
+        予測確率 × 単勝オッズ >= ev_threshold かつ
+        予測確率 >= min_pred_prob の馬を予測確率降順でソートし、
         上位 max_bets 頭の馬番を返す。
 
         オッズは特徴量データ（odds_tan）を優先し、
@@ -526,9 +532,14 @@ class ModelEvaluator:
         ninki_ranks = self._derive_ninki_rank(horse_odds)
 
         # --- Phase 3: 補正適用 & EV計算 ---
-        candidates: list[tuple[str, float]] = []  # (umaban, ev)
+        # (umaban, ev, pred_prob) — 予測確率降順でソート
+        candidates: list[tuple[str, float, float]] = []
 
         for umaban, row, pred_prob in horse_rows:
+            # 最低予想勝率フィルタ
+            if pred_prob < min_pred_prob:
+                continue
+
             odds_tan = horse_odds.get(umaban, 0.0)
             if odds_tan <= 0:
                 continue
@@ -542,9 +553,10 @@ class ModelEvaluator:
 
             ev = pred_prob * odds_tan
             if ev >= ev_threshold:
-                candidates.append((umaban, ev))
+                candidates.append((umaban, ev, pred_prob))
 
-        candidates.sort(key=lambda x: x[1], reverse=True)
+        # 予測勝率が高い順にソート
+        candidates.sort(key=lambda x: x[2], reverse=True)
         return [c[0] for c in candidates[:max_bets]]
 
     def _bet_value_tansho(
@@ -552,9 +564,10 @@ class ModelEvaluator:
         group: pd.DataFrame,
         harai_data: dict,
         race_key: dict[str, str],
-        ev_threshold: float = 1.2,
-        max_bets: int = 3,
+        ev_threshold: float = 1.1,
+        max_bets: int = 2,
         odds_correction_config: dict[str, Any] | None = None,
+        min_pred_prob: float = 0.025,
     ) -> dict[str, int]:
         """期待値ベースで単勝を購入する.
 
@@ -563,6 +576,7 @@ class ModelEvaluator:
         qualified = self._select_value_candidates(
             group, race_key, ev_threshold, max_bets,
             odds_correction_config=odds_correction_config,
+            min_pred_prob=min_pred_prob,
         )
         race_harai = harai_data.get(self._race_key_str(race_key), {})
         tansho = race_harai.get("tansho", {})
@@ -591,9 +605,10 @@ class ModelEvaluator:
         group: pd.DataFrame,
         harai_data: dict,
         race_key: dict[str, str],
-        ev_threshold: float = 1.2,
-        max_bets: int = 3,
+        ev_threshold: float = 1.1,
+        max_bets: int = 2,
         odds_correction_config: dict[str, Any] | None = None,
+        min_pred_prob: float = 0.025,
     ) -> dict[str, int]:
         """期待値ベースで馬連を購入する.
 
@@ -602,6 +617,7 @@ class ModelEvaluator:
         qualified = self._select_value_candidates(
             group, race_key, ev_threshold, max_bets,
             odds_correction_config=odds_correction_config,
+            min_pred_prob=min_pred_prob,
         )
         race_harai = harai_data.get(self._race_key_str(race_key), {})
         umaren_harai = race_harai.get("umaren", {})
