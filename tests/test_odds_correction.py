@@ -958,3 +958,365 @@ class TestClassLevel:
         assert class_level("", "") == -1
         assert class_level("abc", "") == -1
         assert class_level("500", "") == -1  # 101-200 の範囲外
+
+
+# =====================================================================
+# v3: 父系統×サーフェス別テーブル補正テスト
+# =====================================================================
+
+
+class TestSireSurfaceTableCorrection:
+    """sire_surface_table による父系統×サーフェス別補正のテスト."""
+
+    def setup_method(self) -> None:
+        self.evaluator = ModelEvaluator()
+
+    def _make_row(self, **kwargs) -> pd.Series:
+        defaults = {
+            "jockey_win_rate_year": 0.0,
+            "horse_last_jyuni": 99,
+            "post_umaban": 0,
+            "blood_father_keito": "サンデーサイレンス",
+            "race_track_cd": "11",
+            "race_jyo_cd": "05",
+            "race_distance": 1600,
+        }
+        defaults.update(kwargs)
+        return pd.Series(defaults)
+
+    def test_sire_surface_factor_applied(self) -> None:
+        """父系統×サーフェスのfactorが正しく乗算されること."""
+        config: dict = {
+            "enabled": True,
+            "sire_surface_table": {"サンデーサイレンス_siba": 1.05},
+            "rules": {},
+        }
+        row = self._make_row(
+            blood_father_keito="サンデーサイレンス",
+            race_track_cd="11",
+            race_jyo_cd="05",
+        )
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        assert abs(result - 10.0 * 1.05) < 0.01
+
+    def test_sire_surface_missing_key_no_effect(self) -> None:
+        """テーブルにキーがない場合 factor=1.0 であること."""
+        config: dict = {
+            "enabled": True,
+            "sire_surface_table": {"キングカメハメハ_dirt": 0.88},
+            "rules": {},
+        }
+        row = self._make_row(
+            blood_father_keito="サンデーサイレンス",
+            race_track_cd="11",
+            race_jyo_cd="05",
+        )
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        assert result == 10.0
+
+    def test_sire_surface_empty_table_no_effect(self) -> None:
+        """sire_surface_table が空辞書の場合、補正なしであること."""
+        config: dict = {
+            "enabled": True,
+            "sire_surface_table": {},
+            "rules": {},
+        }
+        row = self._make_row()
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        assert result == 10.0
+
+    def test_sire_surface_yousiba_classification(self) -> None:
+        """札幌(01)・函館(02)の芝コースが yousiba に分類されること."""
+        config: dict = {
+            "enabled": True,
+            "sire_surface_table": {"サンデーサイレンス_yousiba": 1.12},
+            "rules": {},
+        }
+        # 札幌 (01) + 芝コース (trackcd < 23)
+        row = self._make_row(
+            blood_father_keito="サンデーサイレンス",
+            race_track_cd="11",
+            race_jyo_cd="01",
+        )
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        assert abs(result - 10.0 * 1.12) < 0.01
+
+        # 函館 (02) + 芝コース
+        row2 = self._make_row(
+            blood_father_keito="サンデーサイレンス",
+            race_track_cd="10",
+            race_jyo_cd="02",
+        )
+        result2 = self.evaluator._apply_odds_correction(10.0, row2, 10, config)
+        assert abs(result2 - 10.0 * 1.12) < 0.01
+
+    def test_sire_surface_dirt_classification(self) -> None:
+        """trackcd >= 23 が dirt に分類されること."""
+        config: dict = {
+            "enabled": True,
+            "sire_surface_table": {"サンデーサイレンス_dirt": 0.88},
+            "rules": {},
+        }
+        row = self._make_row(
+            blood_father_keito="サンデーサイレンス",
+            race_track_cd="23",
+            race_jyo_cd="05",
+        )
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        assert abs(result - 10.0 * 0.88) < 0.01
+
+    def test_sire_surface_no_table_key_in_config(self) -> None:
+        """config に sire_surface_table キーがなくても動作する."""
+        config: dict = {
+            "enabled": True,
+            "rules": {},
+        }
+        row = self._make_row()
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        assert result == 10.0
+
+    def test_sire_surface_combined_with_ninki(self) -> None:
+        """ninki_table と sire_surface_table が乗算される."""
+        config: dict = {
+            "enabled": True,
+            "ninki_table": {1: 0.90},
+            "sire_surface_table": {"サンデーサイレンス_siba": 1.05},
+            "rules": {},
+        }
+        row = self._make_row()
+        result = self.evaluator._apply_odds_correction(10.0, row, 1, config)
+        expected = 10.0 * 0.90 * 1.05
+        assert abs(result - expected) < 0.01
+
+
+# =====================================================================
+# v3: 父系統×距離帯別テーブル補正テスト
+# =====================================================================
+
+
+class TestSireDistanceTableCorrection:
+    """sire_distance_table による父系統×距離帯別補正のテスト."""
+
+    def setup_method(self) -> None:
+        self.evaluator = ModelEvaluator()
+
+    def _make_row(self, **kwargs) -> pd.Series:
+        defaults = {
+            "jockey_win_rate_year": 0.0,
+            "horse_last_jyuni": 99,
+            "post_umaban": 0,
+            "blood_father_keito": "サンデーサイレンス",
+            "race_track_cd": "11",
+            "race_jyo_cd": "05",
+            "race_distance": 1600,
+        }
+        defaults.update(kwargs)
+        return pd.Series(defaults)
+
+    def test_sire_distance_factor_applied(self) -> None:
+        """父系統×距離帯のfactorが正しく乗算されること."""
+        config: dict = {
+            "enabled": True,
+            "sire_distance_table": {"サンデーサイレンス_mile": 1.03},
+            "rules": {},
+        }
+        row = self._make_row(race_distance=1600)
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        assert abs(result - 10.0 * 1.03) < 0.01
+
+    def test_sire_distance_boundary_1400(self) -> None:
+        """距離1400mが sprint に分類されること."""
+        config: dict = {
+            "enabled": True,
+            "sire_distance_table": {"サンデーサイレンス_sprint": 0.95},
+            "rules": {},
+        }
+        row = self._make_row(race_distance=1400)
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        assert abs(result - 10.0 * 0.95) < 0.01
+
+    def test_sire_distance_boundary_1401(self) -> None:
+        """距離1401mが mile に分類されること."""
+        config: dict = {
+            "enabled": True,
+            "sire_distance_table": {"サンデーサイレンス_mile": 1.03},
+            "rules": {},
+        }
+        row = self._make_row(race_distance=1401)
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        assert abs(result - 10.0 * 1.03) < 0.01
+
+    def test_sire_distance_boundary_2200(self) -> None:
+        """距離2200mが middle に分類されること."""
+        config: dict = {
+            "enabled": True,
+            "sire_distance_table": {"サンデーサイレンス_middle": 1.08},
+            "rules": {},
+        }
+        row = self._make_row(race_distance=2200)
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        assert abs(result - 10.0 * 1.08) < 0.01
+
+    def test_sire_distance_boundary_2201(self) -> None:
+        """距離2201mが long に分類されること."""
+        config: dict = {
+            "enabled": True,
+            "sire_distance_table": {"サンデーサイレンス_long": 1.15},
+            "rules": {},
+        }
+        row = self._make_row(race_distance=2201)
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        assert abs(result - 10.0 * 1.15) < 0.01
+
+    def test_sire_distance_missing_key_no_effect(self) -> None:
+        """テーブルにキーがない場合 factor=1.0 であること."""
+        config: dict = {
+            "enabled": True,
+            "sire_distance_table": {"キングカメハメハ_sprint": 0.90},
+            "rules": {},
+        }
+        row = self._make_row(
+            blood_father_keito="サンデーサイレンス",
+            race_distance=1200,
+        )
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        assert result == 10.0
+
+    def test_sire_distance_empty_table_no_effect(self) -> None:
+        """sire_distance_table が空辞書の場合、補正なしであること."""
+        config: dict = {
+            "enabled": True,
+            "sire_distance_table": {},
+            "rules": {},
+        }
+        row = self._make_row()
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        assert result == 10.0
+
+    def test_sire_distance_no_table_key_in_config(self) -> None:
+        """config に sire_distance_table キーがなくても動作する."""
+        config: dict = {
+            "enabled": True,
+            "rules": {},
+        }
+        row = self._make_row()
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        assert result == 10.0
+
+    def test_sire_surface_and_distance_combined(self) -> None:
+        """sire_surface_table と sire_distance_table が両方乗算される."""
+        config: dict = {
+            "enabled": True,
+            "sire_surface_table": {"サンデーサイレンス_siba": 1.05},
+            "sire_distance_table": {"サンデーサイレンス_mile": 1.03},
+            "rules": {},
+        }
+        row = self._make_row(
+            blood_father_keito="サンデーサイレンス",
+            race_track_cd="11",
+            race_jyo_cd="05",
+            race_distance=1600,
+        )
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        expected = 10.0 * 1.05 * 1.03
+        assert abs(result - expected) < 0.01
+
+    def test_sire_distance_zero_distance(self) -> None:
+        """距離が0の場合 sprint に分類される（エッジケース）."""
+        config: dict = {
+            "enabled": True,
+            "sire_distance_table": {"サンデーサイレンス_sprint": 0.95},
+            "rules": {},
+        }
+        row = self._make_row(race_distance=0)
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        assert abs(result - 10.0 * 0.95) < 0.01
+
+
+# =====================================================================
+# v3: save/load ラウンドトリップテスト（新テーブル）
+# =====================================================================
+
+
+class TestSireTableRoundtrip:
+    """sire_surface_table / sire_distance_table の save/load テスト."""
+
+    def _make_sample_stats(self) -> dict:
+        return {
+            "generated_at": "2026-02-21T12:00:00",
+            "period": {"start": "2022", "end": "2024"},
+            "baseline_roi": 0.775,
+            "baseline_samples": 100000,
+            "min_samples": 1000,
+            "ninki_table": {
+                "1": {"factor": 0.85, "samples": 5000, "roi": 0.659},
+            },
+            "style_table": {},
+            "post_course_table": {},
+            "sire_surface_table": {
+                "サンデーサイレンス_siba": {
+                    "factor": 1.05, "samples": 12000, "roi": 0.814,
+                },
+                "サンデーサイレンス_dirt": {
+                    "factor": 0.88, "samples": 8000, "roi": 0.682,
+                },
+            },
+            "sire_distance_table": {
+                "サンデーサイレンス_sprint": {
+                    "factor": 0.95, "samples": 10000, "roi": 0.736,
+                },
+                "ディープインパクト_long": {
+                    "factor": 1.15, "samples": 3000, "roi": 0.891,
+                },
+            },
+            "rules": {},
+        }
+
+    def test_sire_surface_table_roundtrip(self) -> None:
+        """sire_surface_table が正しく save/load される."""
+        stats = self._make_sample_stats()
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = Path(f.name)
+
+        try:
+            save_odds_correction_stats(stats, path)
+            config = load_odds_correction_stats(path)
+
+            assert "sire_surface_table" in config
+            assert abs(config["sire_surface_table"]["サンデーサイレンス_siba"] - 1.05) < 0.001
+            assert abs(config["sire_surface_table"]["サンデーサイレンス_dirt"] - 0.88) < 0.001
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_sire_distance_table_roundtrip(self) -> None:
+        """sire_distance_table が正しく save/load される."""
+        stats = self._make_sample_stats()
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = Path(f.name)
+
+        try:
+            save_odds_correction_stats(stats, path)
+            config = load_odds_correction_stats(path)
+
+            assert "sire_distance_table" in config
+            assert abs(config["sire_distance_table"]["サンデーサイレンス_sprint"] - 0.95) < 0.001
+            assert abs(config["sire_distance_table"]["ディープインパクト_long"] - 1.15) < 0.001
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_load_without_sire_tables(self) -> None:
+        """sire テーブルがないJSONでもエラーなくロードできる（後方互換）."""
+        stats = self._make_sample_stats()
+        del stats["sire_surface_table"]
+        del stats["sire_distance_table"]
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = Path(f.name)
+
+        try:
+            save_odds_correction_stats(stats, path)
+            config = load_odds_correction_stats(path)
+
+            assert config["sire_surface_table"] == {}
+            assert config["sire_distance_table"] == {}
+        finally:
+            path.unlink(missing_ok=True)

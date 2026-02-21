@@ -122,6 +122,16 @@ def build_odds_correction_stats(
         baseline_roi, min_samples,
     )
 
+    # v3: 父系統×サーフェス別テーブル
+    sire_surface_table = _calc_sire_surface_stats(
+        year_start, year_end, baseline_roi, min_samples=500,
+    )
+
+    # v3: 父系統×距離帯別テーブル
+    sire_distance_table = _calc_sire_distance_stats(
+        year_start, year_end, baseline_roi, min_samples=500,
+    )
+
     stats: dict[str, Any] = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "period": {"start": year_start, "end": year_end},
@@ -131,6 +141,8 @@ def build_odds_correction_stats(
         "ninki_table": ninki_table,
         "style_table": style_table,
         "post_course_table": post_course_table,
+        "sire_surface_table": sire_surface_table,
+        "sire_distance_table": sire_distance_table,
         "rules": {
             "jockey_popular_discount": jockey_stats,
             "form_popular_discount": form_stats,
@@ -216,6 +228,18 @@ def load_odds_correction_stats(
     for k, v in post_course_table_raw.items():
         post_course_table[k] = v["factor"] if isinstance(v, dict) else float(v)
 
+    # sire_surface_table: キーは "{keitoname}_{surface}"
+    sire_surface_table_raw = stats.get("sire_surface_table", {})
+    sire_surface_table: dict[str, float] = {}
+    for k, v in sire_surface_table_raw.items():
+        sire_surface_table[k] = v["factor"] if isinstance(v, dict) else float(v)
+
+    # sire_distance_table: キーは "{keitoname}_{dist_cat}"
+    sire_distance_table_raw = stats.get("sire_distance_table", {})
+    sire_distance_table: dict[str, float] = {}
+    for k, v in sire_distance_table_raw.items():
+        sire_distance_table[k] = v["factor"] if isinstance(v, dict) else float(v)
+
     # rules: factor 以外のキーも含めて渡す
     rules = stats.get("rules", {})
 
@@ -224,6 +248,8 @@ def load_odds_correction_stats(
         "ninki_table": ninki_table,
         "style_table": style_table,
         "post_course_table": post_course_table,
+        "sire_surface_table": sire_surface_table,
+        "sire_distance_table": sire_distance_table,
         "rules": rules,
     }
 
@@ -1069,4 +1095,160 @@ def _calc_filly_transition_stats(
             label, factor, roi, cnt,
         )
 
+    return result
+
+
+# =====================================================================
+# v3 統計: 父系統×サーフェス・距離帯
+# =====================================================================
+
+
+def _calc_sire_surface_stats(
+    year_start: str,
+    year_end: str,
+    baseline_roi: float,
+    min_samples: int = 500,
+) -> dict[str, dict[str, Any]]:
+    """父系統 × サーフェス別の単勝回収率factorテーブルを算出する.
+
+    Args:
+        year_start: 集計開始年
+        year_end: 集計終了年
+        baseline_roi: 全体の基準回収率
+        min_samples: 最小サンプル数（デフォルト500）
+
+    Returns:
+        {"サンデーサイレンス_siba": {"factor": 1.05, "samples": 12000, "roi": 0.865}, ...}
+    """
+    sql = f"""
+    SELECT
+        kt.keitoname AS father_keito,
+        CASE
+            WHEN CAST(r.trackcd AS integer) >= 23 THEN 'dirt'
+            WHEN r.jyocd IN ('01','02') THEN 'yousiba'
+            ELSE 'siba'
+        END AS surface,
+        COUNT(*) AS cnt,
+        SUM(CASE WHEN ur.kakuteijyuni ~ '^[0-9]+$'
+                      AND CAST(ur.kakuteijyuni AS int) = 1
+            THEN COALESCE(CAST(o.tanodds AS numeric) / 10.0, 0)
+            ELSE 0 END) * 100 AS total_pay
+    FROM n_uma_race ur
+    JOIN n_race r USING (year, monthday, jyocd, kaiji, nichiji, racenum)
+    JOIN n_sanku sk ON ur.kettonum = sk.kettonum
+    JOIN n_keito kt ON sk.fnum = kt.hansyokunum
+    JOIN n_odds_tanpuku o
+        ON ur.year = o.year AND ur.monthday = o.monthday
+        AND ur.jyocd = o.jyocd AND ur.kaiji = o.kaiji
+        AND ur.nichiji = o.nichiji AND ur.racenum = o.racenum
+        AND ur.umaban = o.umaban
+    WHERE ur.datakubun = '7' AND ur.ijyocd = '0'
+      AND ur.kakuteijyuni ~ '^[0-9]+$'
+      AND ur.year BETWEEN %(start)s AND %(end)s
+      AND {_jyo_filter("ur.")}
+      AND r.trackcd ~ '^[0-9]+$'
+      AND o.tanodds ~ '^[0-9]+$'
+      AND CAST(o.tanodds AS int) > 0
+    GROUP BY kt.keitoname, surface
+    """
+    df = query_df(sql, {"start": year_start, "end": year_end})
+
+    result: dict[str, dict[str, Any]] = {}
+    for _, row in df.iterrows():
+        keito = str(row["father_keito"]).strip()
+        surface = str(row["surface"]).strip()
+        key = f"{keito}_{surface}"
+        cnt = int(row["cnt"])
+        total_pay = float(row["total_pay"])
+        total_bet = cnt * 100
+        roi = total_pay / total_bet if total_bet > 0 else 0.0
+
+        if cnt >= min_samples and baseline_roi > 0:
+            factor = roi / baseline_roi
+        else:
+            factor = 1.0
+
+        result[key] = {
+            "factor": round(factor, 6),
+            "samples": cnt,
+            "roi": round(roi, 6),
+        }
+
+    logger.info("sire_surface_table: %d区分", len(result))
+    return result
+
+
+def _calc_sire_distance_stats(
+    year_start: str,
+    year_end: str,
+    baseline_roi: float,
+    min_samples: int = 500,
+) -> dict[str, dict[str, Any]]:
+    """父系統 × 距離帯別の単勝回収率factorテーブルを算出する.
+
+    Args:
+        year_start: 集計開始年
+        year_end: 集計終了年
+        baseline_roi: 全体の基準回収率
+        min_samples: 最小サンプル数（デフォルト500）
+
+    Returns:
+        {"サンデーサイレンス_sprint": {"factor": 0.95, "samples": 10000, "roi": 0.782}, ...}
+    """
+    sql = f"""
+    SELECT
+        kt.keitoname AS father_keito,
+        CASE
+            WHEN CAST(r.kyori AS integer) <= 1400 THEN 'sprint'
+            WHEN CAST(r.kyori AS integer) <= 1800 THEN 'mile'
+            WHEN CAST(r.kyori AS integer) <= 2200 THEN 'middle'
+            ELSE 'long'
+        END AS dist_cat,
+        COUNT(*) AS cnt,
+        SUM(CASE WHEN ur.kakuteijyuni ~ '^[0-9]+$'
+                      AND CAST(ur.kakuteijyuni AS int) = 1
+            THEN COALESCE(CAST(o.tanodds AS numeric) / 10.0, 0)
+            ELSE 0 END) * 100 AS total_pay
+    FROM n_uma_race ur
+    JOIN n_race r USING (year, monthday, jyocd, kaiji, nichiji, racenum)
+    JOIN n_sanku sk ON ur.kettonum = sk.kettonum
+    JOIN n_keito kt ON sk.fnum = kt.hansyokunum
+    JOIN n_odds_tanpuku o
+        ON ur.year = o.year AND ur.monthday = o.monthday
+        AND ur.jyocd = o.jyocd AND ur.kaiji = o.kaiji
+        AND ur.nichiji = o.nichiji AND ur.racenum = o.racenum
+        AND ur.umaban = o.umaban
+    WHERE ur.datakubun = '7' AND ur.ijyocd = '0'
+      AND ur.kakuteijyuni ~ '^[0-9]+$'
+      AND ur.year BETWEEN %(start)s AND %(end)s
+      AND {_jyo_filter("ur.")}
+      AND r.kyori ~ '^[0-9]+$'
+      AND o.tanodds ~ '^[0-9]+$'
+      AND CAST(o.tanodds AS int) > 0
+    GROUP BY kt.keitoname, dist_cat
+    """
+    df = query_df(sql, {"start": year_start, "end": year_end})
+
+    result: dict[str, dict[str, Any]] = {}
+    for _, row in df.iterrows():
+        keito = str(row["father_keito"]).strip()
+        dist_cat = str(row["dist_cat"]).strip()
+        key = f"{keito}_{dist_cat}"
+        cnt = int(row["cnt"])
+        total_pay = float(row["total_pay"])
+        total_bet = cnt * 100
+        roi = total_pay / total_bet if total_bet > 0 else 0.0
+
+        if cnt >= min_samples and baseline_roi > 0:
+            factor = roi / baseline_roi
+        else:
+            factor = 1.0
+
+        result[key] = {
+            "factor": round(factor, 6),
+            "samples": cnt,
+            "roi": round(roi, 6),
+        }
+
+    logger.info("sire_distance_table: %d区分", len(result))
     return result

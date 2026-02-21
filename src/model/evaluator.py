@@ -857,6 +857,46 @@ class ModelEvaluator:
                 if prev_fo == 0 and cur_fo == 1:
                     factor *= r["factor"]
 
+        # Step 8: 父系統×サーフェス別テーブル
+        sire_surface_table = config.get("sire_surface_table", {})
+        if sire_surface_table:
+            father_keito = str(row.get("blood_father_keito", "") or "")
+            track_cd_val = str(row.get("race_track_cd", "") or "")
+            jyo_cd = str(row.get("race_jyo_cd", "") or "")
+            try:
+                track_cd_int = int(track_cd_val)
+            except (ValueError, TypeError):
+                track_cd_int = 0
+            if track_cd_int >= 23:
+                surface = "dirt"
+            elif jyo_cd in ("01", "02"):
+                surface = "yousiba"
+            else:
+                surface = "siba"
+            sire_surface_key = f"{father_keito}_{surface}"
+            if sire_surface_key in sire_surface_table:
+                factor *= sire_surface_table[sire_surface_key]
+
+        # Step 9: 父系統×距離帯別テーブル
+        sire_distance_table = config.get("sire_distance_table", {})
+        if sire_distance_table:
+            father_keito = str(row.get("blood_father_keito", "") or "")
+            try:
+                kyori = int(row.get("race_distance", 0) or 0)
+            except (ValueError, TypeError):
+                kyori = 0
+            if kyori <= 1400:
+                dist_cat = "sprint"
+            elif kyori <= 1800:
+                dist_cat = "mile"
+            elif kyori <= 2200:
+                dist_cat = "middle"
+            else:
+                dist_cat = "long"
+            sire_dist_key = f"{father_keito}_{dist_cat}"
+            if sire_dist_key in sire_distance_table:
+                factor *= sire_distance_table[sire_dist_key]
+
         return odds * factor
 
     # ------------------------------------------------------------------
