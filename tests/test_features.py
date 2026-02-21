@@ -331,9 +331,11 @@ class TestFeaturePipeline:
         from src.features.pipeline import FeaturePipeline
 
         names = FeaturePipeline._cross_feature_names()
-        assert len(names) == 8
+        assert len(names) == 10
         assert "cross_dist_change" in names
         assert "cross_track_change" in names
+        assert "cross_prev_filly_only" in names
+        assert "cross_current_filly_only" in names
 
     def test_relative_feature_names(self) -> None:
         from src.features.pipeline import FeaturePipeline

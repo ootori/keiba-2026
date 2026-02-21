@@ -690,6 +690,37 @@ class ModelEvaluator:
             for rank, (umaban, _) in enumerate(sorted_items)
         }
 
+    @staticmethod
+    def _post_group(umaban: int) -> str:
+        """馬番をグループに分類する."""
+        if 1 <= umaban <= 3:
+            return "inner"
+        elif 4 <= umaban <= 6:
+            return "mid_inner"
+        elif 7 <= umaban <= 9:
+            return "mid_outer"
+        else:
+            return "outer"
+
+    @staticmethod
+    def _course_category(jyo_cd: str, track_cd: str) -> str:
+        """コースカテゴリを判定する."""
+        if jyo_cd == "04" and track_cd == "10":
+            return "niigata_straight"
+        try:
+            tc = int(track_cd)
+        except (ValueError, TypeError):
+            return "other"
+        if tc in (10, 11, 12):
+            return "turf_left"
+        elif tc in (17, 18):
+            return "turf_right"
+        elif tc == 23:
+            return "dirt_left"
+        elif tc == 24:
+            return "dirt_right"
+        return "other"
+
     def _apply_odds_correction(
         self,
         odds: float,
@@ -743,25 +774,88 @@ class ModelEvaluator:
             ):
                 factor *= r["factor"]
 
-        # ルール3: 奇数ゲート → 割引
-        r = rules.get("odd_gate_discount", {})
-        if r:
-            try:
-                umaban_int = int(row.get("post_umaban", 0) or 0)
-            except (ValueError, TypeError):
-                umaban_int = 0
-            if umaban_int > 0 and umaban_int % 2 == 1:
+        # ルールA: 前走脚質別テーブル補正
+        style_table = config.get("style_table", {})
+        if style_table:
+            style_last = str(row.get("style_type_last", "0") or "0")
+            if style_last in style_table:
+                factor *= style_table[style_last]
+
+        # ルールB: 馬番×コース別テーブル補正（post_course_table がある場合）
+        # post_course_table がない場合は旧 gate parity ルールにフォールバック
+        post_course_table = config.get("post_course_table", {})
+        try:
+            umaban_int = int(row.get("post_umaban", 0) or 0)
+        except (ValueError, TypeError):
+            umaban_int = 0
+
+        if post_course_table and umaban_int > 0:
+            pg = self._post_group(umaban_int)
+            jyo_cd = str(row.get("race_jyo_cd", "") or "")
+            track_cd = str(row.get("race_track_cd", "") or "")
+            cc = self._course_category(jyo_cd, track_cd)
+            key = f"{pg}_{cc}"
+            if key in post_course_table:
+                factor *= post_course_table[key]
+            elif pg in post_course_table:
+                # フォールバック: post_group のみ
+                factor *= post_course_table[pg]
+        elif umaban_int > 0:
+            # レガシー: 奇数/偶数ゲートルール
+            r = rules.get("odd_gate_discount", {})
+            if r and umaban_int % 2 == 1:
+                factor *= r["factor"]
+            r = rules.get("even_gate_boost", {})
+            if r and umaban_int % 2 == 0:
                 factor *= r["factor"]
 
-        # ルール4: 偶数ゲート → 上乗せ
-        r = rules.get("even_gate_boost", {})
-        if r:
+        # ルールC1: クラス昇級
+        r = rules.get("class_upgrade", {})
+        if r and r.get("factor", 1.0) != 1.0:
             try:
-                umaban_int = int(row.get("post_umaban", 0) or 0)
+                cc_val = float(row.get("cross_class_change", 0) or 0)
             except (ValueError, TypeError):
-                umaban_int = 0
-            if umaban_int > 0 and umaban_int % 2 == 0:
+                cc_val = 0
+            if cc_val > 0:
                 factor *= r["factor"]
+
+        # ルールC2: クラス降級
+        r = rules.get("class_downgrade", {})
+        if r and r.get("factor", 1.0) != 1.0:
+            try:
+                cc_val = float(row.get("cross_class_change", 0) or 0)
+            except (ValueError, TypeError):
+                cc_val = 0
+            if cc_val < 0:
+                factor *= r["factor"]
+
+        # ルールC3: 牝馬限定→混合
+        r = rules.get("filly_to_mixed", {})
+        if r and r.get("factor", 1.0) != 1.0:
+            sex = str(row.get("horse_sex", "") or "")
+            if sex == "2":
+                try:
+                    prev_fo = int(row.get("cross_prev_filly_only", 0) or 0)
+                    cur_fo = int(row.get("cross_current_filly_only", 0) or 0)
+                except (ValueError, TypeError):
+                    prev_fo = 0
+                    cur_fo = 0
+                if prev_fo == 1 and cur_fo == 0:
+                    factor *= r["factor"]
+
+        # ルールC4: 混合→牝馬限定
+        r = rules.get("mixed_to_filly", {})
+        if r and r.get("factor", 1.0) != 1.0:
+            sex = str(row.get("horse_sex", "") or "")
+            if sex == "2":
+                try:
+                    prev_fo = int(row.get("cross_prev_filly_only", 0) or 0)
+                    cur_fo = int(row.get("cross_current_filly_only", 0) or 0)
+                except (ValueError, TypeError):
+                    prev_fo = 0
+                    cur_fo = 0
+                if prev_fo == 0 and cur_fo == 1:
+                    factor *= r["factor"]
 
         return odds * factor
 

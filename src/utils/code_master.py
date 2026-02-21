@@ -214,6 +214,38 @@ def interval_category(days: int) -> str:
         return "kyuumei"      # 休み明け（半年以上）
 
 
+def class_level(jyokencd5: str, gradecd: str) -> int:
+    """条件コード+グレードからクラス序列値を返す.
+
+    大きい値ほど高いクラスを表す。
+
+    Args:
+        jyokencd5: 競走条件コード（最若年）
+        gradecd: グレードコード
+
+    Returns:
+        序列値（-1=判定不可, 100=新馬/未勝利, 条件戦は数値そのまま,
+        900=オープン, 1000=重賞）
+    """
+    gradecd = str(gradecd or "").strip()
+    if gradecd in ("A", "B", "C", "D"):
+        return 1000
+    jyoken_str = str(jyokencd5 or "").strip()
+    if not jyoken_str:
+        return -1
+    try:
+        jyoken = int(jyoken_str)
+    except (ValueError, TypeError):
+        return -1
+    if jyoken == 999:
+        return 900
+    if jyoken in (701, 702, 703):
+        return 100
+    if 1 <= jyoken <= 100:
+        return jyoken + 100  # 条件戦: 収得賞金ベース (201-200)
+    return -1
+
+
 def baba_code_for_track(track_cd: str, siba_baba_cd: str, dirt_baba_cd: str) -> str:
     """トラック種別に応じた馬場状態コードを返す.
 

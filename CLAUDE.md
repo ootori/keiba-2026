@@ -74,7 +74,7 @@ everydb2/
     ├── test_features.py              # 30テスト（pytest）
     ├── test_mining_supplement.py     # マイニング・サプリメントテスト（16テスト）
     ├── test_bms_detail_supplement.py # BMS条件別サプリメントテスト（10テスト）
-    └── test_odds_correction.py      # オッズ歪み補正テスト（34テスト）
+    └── test_odds_correction.py      # オッズ歪み補正テスト（64テスト）
 ```
 
 ## データベース接続
@@ -172,12 +172,12 @@ everydb2/
 13. **血統(17):** 父系統, 母父系統, 母系統, 芝ダ適性, 距離適性, 馬場状態別適性, 競馬場別適性, ニックス（父×母父相性）, 母産駒成績, 近交フラグ・世代
 14. **間隔(5):** 中N日, 休み明け区分, ローテーション
 15. **オッズ(7):** 単勝オッズ, 複勝オッズ, 人気順（※予測タイミング依存）
-16. **クロス特徴量(8):** 距離変更, 芝ダ変更, クラス変更, 斤量/体重比
+16. **クロス特徴量(10):** 距離変更, 芝ダ変更, クラス変更, 斤量/体重比, 前走牝馬限定フラグ, 現在レース牝馬限定フラグ
 17. **レース内相対特徴量(36):** 主要能力指標のレース内Zスコア・ランク（血統4指標追加）
 18. **マイニング予想(7):** DM予想タイム, DM予想順位, DM誤差幅, 対戦型スコア（サプリメント）
 19. **BMS条件別(6):** BMS距離帯別/馬場別/競馬場別/父馬齢別/ニックス芝ダ別/父クラス別（サプリメント）
 
-合計 **約192特徴量**（v1: ~180 + マイニング: 7 + BMS条件別: 6 ※サプリメント含む。詳細は `docs/feature_design.md` 参照）
+合計 **約194特徴量**（v1: ~182 + マイニング: 7 + BMS条件別: 6 ※サプリメント含む。クロス特徴量8→10で+2。詳細は `docs/feature_design.md` 参照）
 
 ### v2 深掘り提案（2026-02-20策定）
 
@@ -461,6 +461,7 @@ father側の6条件別特徴量に対し、BMS側は2つのみという非対称
 - **value_bet のオッズ取得:** `value_bet` 戦略は特徴量の `odds_tan` を優先し、欠損時（オッズ特徴量未使用時）は `n_odds_tanpuku` テーブルからレース単位で単勝オッズを取得する。これにより `--with-odds` なしでも value_bet が動作する
 - **MISSING_RATE=0.0 の特徴量ごとの意味の違い:** `_add_relative_features()` では `missing_type` パラメータで欠損値処理を3パターンに分類している。rate系特徴量（勝率・複勝率等）では0.0は「0%」という正当な値であり、NaN化すると弱い馬のZスコアが平均に引き上げられ性能が低下する。新しい相対特徴量を追加する際は `missing_type` を必ず適切に設定すること（"numeric"/"rate"/"blood"）
 - **サプリメント特徴量の欠損値戦略:** `bms_detail` サプリメントでは `MISSING_RATE=0.0` ではなく `NaN`（LightGBMネイティブ欠損）を使用している。率系特徴量（複勝率）で「サンプル数不足（MIN_SAMPLES未満）でデータなし」と「本当に複勝率0%」を区別するため。新しいサプリメントで率系特徴量を追加する場合も、同様に最小サンプル数閾値 + NaN 方式を推奨
+- **オッズ補正v2のparquet依存:** `cross_class_change`（修正版）, `cross_prev_filly_only`, `cross_current_filly_only` はパイプライン構築時に生成される。旧parquetでは `cross_class_change` が常に0、他2つは存在しないため、v2補正ルール（クラス変更・牝馬限定遷移）を有効にするには `--force-rebuild` でparquetを再構築する必要がある
 - **高カーディナリティIDの特徴量除外:** `blood_mother_id`（母馬繁殖登録番号）は数千種のユニーク値を持つため特徴量から削除した。カテゴリ変数では過学習し、数値変数ではID番号の大小に意味がないため分割が無意味になる。母馬の情報は `blood_mother_keito`（母系統）と `blood_mother_produce_rate`（母産駒成績）でカバーしている。同様に、LightGBMの `categorical_feature` に指定するのはユニーク数が数十〜100程度までのカラムに限定すること
 
 ## 回収率シミュレーション戦略
@@ -492,21 +493,71 @@ value_bet戦略のEV計算前にオッズを補正ルールで調整する。`ad
 - **factor 算出:** `factor = category_roi / baseline_roi`（factor < 1.0 → 過大評価、> 1.0 → 過小評価）
 - **最小サンプル閾値:** 1000件未満は factor = 1.0（補正なし）
 
-補正は2段階で適用される（乗算）:
+補正は多段階で適用される（乗算）:
 
 1. **人気順別テーブル（ninki_table）:** 人気1位〜18位それぞれの単勝回収率から個別 factor を算出。人気馬の割引も人気薄の上乗せもデータ駆動で自動算出される
-2. **個別ルール:** 以下の4ルールで追加補正
+2. **個別ルール（v1）:** 人気騎手・前走好走の追加補正
+3. **前走脚質別テーブル（style_table）:** 前走脚質区分（逃げ/先行/差し/追込）ごとのROIベースfactor（v2）
+4. **馬番×コース別テーブル（post_course_table）:** 馬番グループ×コースカテゴリ別のROIベースfactor（v2）
+5. **クラス変更ルール:** 昇級/降級時の補正（v2）
+6. **牝馬限定⇔混合遷移ルール:** 牝馬限定戦↔混合戦の移行時の補正（v2）
 
-| ルール名 | 条件 | 説明 |
-|---------|------|------|
-| `jockey_popular_discount` | 騎手勝率≧15% かつ 人気≦3位 | 人気騎手×人気馬は過大評価 |
-| `form_popular_discount` | 前走3着以内 かつ 人気≦3位 | 前走好走の人気馬は過大評価 |
-| `odd_gate_discount` | 馬番が奇数 | 奇数ゲートは回収率が低い |
-| `even_gate_boost` | 馬番が偶数 | 偶数ゲートは過小評価されがち |
+### 個別ルール一覧
+
+| ルール名 | 条件 | 説明 | バージョン |
+|---------|------|------|----------|
+| `jockey_popular_discount` | 騎手勝率≧15% かつ 人気≦3位 | 人気騎手×人気馬は過大評価 | v1 |
+| `form_popular_discount` | 前走3着以内 かつ 人気≦3位 | 前走好走の人気馬は過大評価 | v1 |
+| `odd_gate_discount` | 馬番が奇数 | 奇数ゲートは回収率が低い（レガシー: post_course_tableがない場合のフォールバック） | v1 |
+| `even_gate_boost` | 馬番が偶数 | 偶数ゲートは過小評価されがち（レガシー: 同上） | v1 |
+| `class_upgrade` | cross_class_change > 0 | 昇級馬は過大評価される傾向 | v2 |
+| `class_downgrade` | cross_class_change < 0 | 降級馬は過小評価される傾向 | v2 |
+| `filly_to_mixed` | 牝馬 + 前走牝限 + 今走混合 | 牝馬限定戦から混合戦への移行は過大評価 | v2 |
+| `mixed_to_filly` | 牝馬 + 前走混合 + 今走牝限 | 混合戦から牝馬限定戦への移行は過小評価 | v2 |
+
+### v2 テーブル補正
+
+**前走脚質別テーブル（style_table）:**
+- 前走の脚質区分（KyakusituKubun: 1=逃げ, 2=先行, 3=差し, 4=追込）ごとに単勝回収率からfactorを算出
+- 追込・差しは展開の影響を受けやすく、オッズに歪みが生じやすい
+- 特徴量 `style_type_last` を参照して適用
+
+**馬番×コース別テーブル（post_course_table）:**
+- 馬番グループ: inner(1-3), mid_inner(4-6), mid_outer(7-9), outer(10+)
+- コースカテゴリ: turf_left, turf_right, dirt_left, dirt_right, niigata_straight, other
+- `{post_group}_{course_cat}` の組み合わせキーで詳細factor → post_group単独のフォールバックfactor → レガシーgate parityの順で適用
+- 新潟直線コース（jyocd=04, trackcd=10）は外枠有利の特殊ケースとして個別に扱う
+- ヘルパーメソッド: `_post_group(umaban)`, `_course_category(jyo_cd, track_cd)`
+
+### フォールバックチェーン
+
+```
+post_course_table あり → post_group × course_cat の完全一致
+  ↓ キーなし
+post_group 単独フォールバック
+  ↓ post_course_table 自体がなし
+レガシー gate parity ルール（odd_gate_discount / even_gate_boost）
+```
+
+### クラス変更・牝馬限定遷移の判定
+
+- **クラス変更:** `class_level()` 関数（`src/utils/code_master.py`）で前走・今走の条件コード+グレードから序列値を算出し比較。特徴量 `cross_class_change` (+1=昇級, 0=同級, -1=降級) を使用
+- **牝馬限定判定:** `BOOL_AND(sexcd='2')` で同レース全出走馬の性別から判定（KigoCDコード表2006が未ドキュメントのため）。特徴量 `cross_prev_filly_only`（前走）と `cross_current_filly_only`（今走）を使用
+- **牝馬限定⇔混合ルールは `horse_sex == "2"`（牝馬）のみ適用**
+
+### 後方互換性
+
+- 旧JSONファイル（v1のみ）は `style_table` / `post_course_table` が欠如するが、フォールバックにより既存のgate parityルールが適用される
+- 旧parquet（`cross_prev_filly_only`, `cross_current_filly_only` なし）ではC3/C4ルールが factor=1.0（無効）として安全にデグレードする
+- `cross_class_change` が修正済みparquetでのみ正しく動作する（旧parquetでは常に0のため昇級/降級が検出されず factor=1.0）
+- **新特徴量を有効にするには `--force-rebuild` でparquetを再構築する必要がある**
 
 人気順はオッズ辞書からレース内で低い順に導出する（`_derive_ninki_rank()`）。統計JSONがない場合は `config.py` の `DEFAULT_ODDS_CORRECTION_CONFIG`（ハードコード値）にフォールバックする。
 
 **関連ファイル:**
-- `src/odds_correction_stats.py` — DB統計算出・JSON保存/ロード
-- `src/model/evaluator.py` — `_apply_odds_correction()` でninki_table + ルール適用
-- `data/odds_correction_stats.json` — 統計データ（`--build-odds-stats`で生成）
+- `src/odds_correction_stats.py` — DB統計算出・JSON保存/ロード（v2: `_calc_running_style_stats`, `_calc_post_position_course_stats`, `_calc_class_change_stats`, `_calc_filly_transition_stats`）
+- `src/model/evaluator.py` — `_apply_odds_correction()` でninki_table + 全ルール適用（v2: `_post_group()`, `_course_category()`）
+- `src/utils/code_master.py` — `class_level()` クラス序列ヘルパー
+- `src/features/pipeline.py` — `cross_class_change`（修正）, `cross_prev_filly_only`, `cross_current_filly_only`（新規）
+- `src/config.py` — `DEFAULT_ODDS_CORRECTION_CONFIG`（v2ルールのデフォルト値追加）
+- `data/odds_correction_stats.json` — 統計データ（`--build-odds-stats`で生成、v2テーブル含む）

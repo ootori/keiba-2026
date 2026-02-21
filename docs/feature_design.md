@@ -43,11 +43,11 @@ EveryDB2のPostgreSQLデータからLightGBMの特徴量を抽出する設計。
 | 13 | 血統 | 17 | bloodline.py | blood_father_id, blood_bms_id, blood_nicks_rate |
 | 14 | 間隔 | 5 | horse.py | interval_days, interval_is_kyuumei |
 | 15 | オッズ | 7 | odds.py | odds_tan, odds_ninki（※デフォルト除外） |
-| 16 | クロス特徴量 | 8 | pipeline.py | cross_dist_change, cross_weight_futan_per_bw |
+| 16 | クロス特徴量 | 10 | pipeline.py | cross_dist_change, cross_weight_futan_per_bw, cross_class_change, cross_prev_filly_only |
 | 17 | レース内相対 | 36 | pipeline.py | rel_*_zscore, rel_*_rank（18指標×2） |
 | 18 | マイニング予想 | 7 | mining.py（サプリメント） | mining_dm_time, mining_tm_score |
 | 19 | BMS条件別 | 6 | bms_detail.py（サプリメント） | blood_bms_dist_rate, blood_father_age_rate |
-| | **現行合計** | **~192** | | ※サプリメント（Cat 18, 19）含む |
+| | **現行合計** | **~194** | | ※サプリメント（Cat 18, 19）含む。クロス特徴量8→10で+2 |
 
 ---
 
@@ -63,7 +63,12 @@ EveryDB2のPostgreSQLデータからLightGBMの特徴量を抽出する設計。
 | 4 | E: ペース構造 | +5 | pipeline.py | 未実装 | 逃げ先行馬数/予想ペース/脚質×ペース相性/レースレベル |
 | 5 | F: 相対特徴量拡張 | +14 | pipeline.py | 未実装 | 馬体重/コンビ成績/斤量比/休養日数/トレンド等のZスコア+ランク |
 | 6 | C: 騎手条件別 | +5 | jockey_trainer.py | 未実装 | 芝ダ別/距離帯別/直近30日/重賞 |
-| | **v2残り合計** | **+37** | | | **→ 約229特徴量**（B実装済み+残りA,C,D,E,F） |
+| | **v2残り合計** | **+37** | | | **→ 約231特徴量**（B実装済み+クロス+2+残りA,C,D,E,F） |
+
+**オッズ歪み補正 v2（2026-02-21実装済み）:**
+- クロス特徴量の拡張（`cross_class_change` 修正, `cross_prev_filly_only`/`cross_current_filly_only` 追加）
+- オッズ補正統計に前走脚質別テーブル（style_table）、馬番×コース別テーブル（post_course_table）、クラス変更/牝馬限定遷移ルールを追加
+- 詳細は上記「クロス特徴量の拡張」「オッズ歪み補正 v2 統計テーブル」セクションを参照
 
 **提案Bの実装備考:**
 - 当初はメインパイプライン（bloodline.py）への組み込みを予定していたが、サプリメント方式で実装した
@@ -72,6 +77,97 @@ EveryDB2のPostgreSQLデータからLightGBMの特徴量を抽出する設計。
 - 使用: `--build-supplement bms_detail` で構築、`--supplement bms_detail` でマージ
 
 詳細（SQL例・算出ロジック・実装方針）は **[docs/features/v2_proposals.md](features/v2_proposals.md)** を参照。
+
+---
+
+## クロス特徴量の拡張（2026-02-21）
+
+カテゴリ16のクロス特徴量を8→10に拡張。既存の `cross_class_change` の計算を修正し、2つの新特徴量を追加。
+
+### 修正: cross_class_change
+
+旧実装では常に0を返していたが、`class_level()` 関数を用いて前走・今走のクラスを序列化し、差分の符号を返すように修正。
+
+- `class_level()` 関数（`src/utils/code_master.py`）:
+  - GradeCD が A/B/C/D → 1000（重賞）
+  - JyokenCD5 = 999 → 900（オープン）
+  - JyokenCD5 = 701/702/703 → 100（新馬/未勝利）
+  - JyokenCD5 が 1〜100 → jyoken+100（条件戦）
+- 値: +1=昇級, 0=同級, -1=降級
+
+### 新規: cross_prev_filly_only
+
+前走レースが牝馬限定戦だったかを示すフラグ（0 or 1）。
+
+- `BOOL_AND(sexcd='2')` で前走レースの全出走馬の性別を確認
+- KigoCDコード表2006が未ドキュメントのため、出走馬の性別による判定方式を採用
+
+### 新規: cross_current_filly_only
+
+今走レースが牝馬限定戦かを示すフラグ（0 or 1）。
+
+- パイプライン構築時に同レース内の全馬の `horse_sex` カラムから判定
+- オッズ歪み補正の牝馬限定⇔混合遷移ルールで使用
+
+### 用途
+
+これらの特徴量はLightGBMモデルの特徴量としてだけでなく、オッズ歪み補正v2のルール判定にも使用される:
+- `cross_class_change`: クラス変更ルール（昇級割引/降級上乗せ）
+- `cross_prev_filly_only` + `cross_current_filly_only`: 牝馬限定⇔混合遷移ルール
+
+**注意:** 旧parquetでは `cross_class_change` が常に0、`cross_prev_filly_only`/`cross_current_filly_only` が存在しないため、これらの特徴量を利用するには `--force-rebuild` で全年度のparquetを再構築する必要がある。
+
+---
+
+## オッズ歪み補正 v2 統計テーブル（2026-02-21追加）
+
+`--build-odds-stats` で生成されるJSONに以下のテーブルが追加された。
+
+### style_table（前走脚質別）
+
+前走の脚質区分（KyakusituKubun）ごとの単勝回収率からfactorを算出。
+
+| キー | 脚質 | 仮説 |
+|------|------|------|
+| `"1"` | 逃げ | 展開に依存しにくく、オッズの歪みは少ない |
+| `"2"` | 先行 | 同上 |
+| `"3"` | 差し | 展開の影響を受けやすく、歪みが生じやすい |
+| `"4"` | 追込 | 最も展開依存度が高く、過大/過小評価されやすい |
+
+### post_course_table（馬番×コース別）
+
+馬番グループとコースカテゴリの組み合わせ別にfactorを算出。
+
+**馬番グループ:**
+| グループ | 馬番 |
+|---------|------|
+| inner | 1-3 |
+| mid_inner | 4-6 |
+| mid_outer | 7-9 |
+| outer | 10+ |
+
+**コースカテゴリ:**
+| カテゴリ | TrackCD範囲 | 備考 |
+|---------|------------|------|
+| turf_left | 10, 11, 12 | 芝左回り+直線 |
+| turf_right | 17, 18 | 芝右回り |
+| dirt_left | 23 | ダート左回り |
+| dirt_right | 24 | ダート右回り |
+| niigata_straight | JyoCD=04 AND TrackCD=10 | 新潟直線（外枠有利の特殊ケース） |
+| other | 上記以外 | フォールバック |
+
+**キー形式:** `{post_group}_{course_cat}`（例: `inner_turf_left`）+ post_group単独のフォールバック
+
+### class_change / filly_transition（ルールベース）
+
+`rules` ディクショナリに追加される4ルール:
+
+| ルール | 条件 | デフォルトfactor |
+|--------|------|-----------------|
+| `class_upgrade` | cross_class_change > 0（昇級） | 0.95 |
+| `class_downgrade` | cross_class_change < 0（降級） | 1.05 |
+| `filly_to_mixed` | 牝馬 + 前走牝限 → 今走混合 | 0.93 |
+| `mixed_to_filly` | 牝馬 + 前走混合 → 今走牝限 | 1.05 |
 
 ---
 

@@ -147,11 +147,26 @@ DEFAULT_ODDS_CORRECTION_CONFIG: dict = {
             "ninki_threshold": 3,
             "factor": 0.92,
         },
+        # レガシー: 奇偶ゲート（post_course_table がある場合は使用されない）
         "odd_gate_discount": {
             "factor": 0.97,
         },
         "even_gate_boost": {
             "factor": 1.03,
+        },
+        # v2: クラス変更
+        "class_upgrade": {
+            "factor": 0.95,
+        },
+        "class_downgrade": {
+            "factor": 1.05,
+        },
+        # v2: 牝馬限定⇔混合遷移
+        "filly_to_mixed": {
+            "factor": 0.93,
+        },
+        "mixed_to_filly": {
+            "factor": 1.05,
         },
     },
 }

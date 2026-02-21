@@ -31,7 +31,7 @@ from src.features.jockey_trainer import JockeyTrainerFeatureExtractor
 from src.features.training import TrainingFeatureExtractor
 from src.features.bloodline import BloodlineFeatureExtractor
 from src.features.odds import OddsFeatureExtractor
-from src.utils.code_master import track_type, distance_category
+from src.utils.code_master import track_type, distance_category, class_level
 from src.utils.base_time import get_or_build_base_time
 
 logger = logging.getLogger(__name__)
@@ -594,6 +594,8 @@ class FeaturePipeline:
             "cross_weight_futan_per_bw",
             "cross_jockey_horse_runs",
             "cross_jockey_horse_wins",
+            "cross_prev_filly_only",
+            "cross_current_filly_only",
         ]
 
     def _add_cross_features(
@@ -644,8 +646,28 @@ class FeaturePipeline:
                 1 if current_tt and prev_tt and current_tt != prev_tt else 0
             )
 
-            # クラス変更
-            result.at[idx, "cross_class_change"] = pi.get("class_change", 0)
+            # クラス変更（+1=昇級, 0=同級, -1=降級）
+            prev_jyoken = pi.get("prev_jyokencd", "")
+            prev_grade = pi.get("prev_gradecd", "")
+            cur_jyoken = str(result.at[idx, "race_jyoken_cd"]) if "race_jyoken_cd" in result.columns else ""
+            cur_grade = str(result.at[idx, "race_grade_cd"]) if "race_grade_cd" in result.columns else ""
+            prev_level = class_level(prev_jyoken, prev_grade)
+            cur_level = class_level(cur_jyoken, cur_grade)
+            if prev_level >= 0 and cur_level >= 0:
+                if cur_level > prev_level:
+                    cc = 1
+                elif cur_level < prev_level:
+                    cc = -1
+                else:
+                    cc = 0
+            else:
+                cc = 0
+            result.at[idx, "cross_class_change"] = cc
+
+            # 前走牝馬限定フラグ
+            result.at[idx, "cross_prev_filly_only"] = (
+                1 if pi.get("prev_filly_only") else 0
+            )
 
             # 競馬場変更
             current_jyo = race_key.get("jyocd", "")
@@ -671,6 +693,13 @@ class FeaturePipeline:
             result.at[idx, "cross_jockey_horse_runs"] = pi.get("jockey_horse_runs", 0)
             result.at[idx, "cross_jockey_horse_wins"] = pi.get("jockey_horse_wins", 0)
 
+        # 現在のレースの牝馬限定フラグ（全出走馬が牝馬なら1）
+        if "horse_sex" in result.columns:
+            all_filly = (result["horse_sex"].astype(str) == "2").all()
+            result["cross_current_filly_only"] = 1 if all_filly else 0
+        else:
+            result["cross_current_filly_only"] = 0
+
         return result
 
     def _get_prev_race_info(
@@ -689,7 +718,15 @@ class FeaturePipeline:
             r.trackcd AS prev_trackcd,
             r.jyocd AS prev_jyocd,
             r.jyokencd5 AS prev_jyokencd,
-            ur.kisyucode AS prev_kisyucode
+            r.gradecd AS prev_gradecd,
+            ur.kisyucode AS prev_kisyucode,
+            (SELECT BOOL_AND(ur2.sexcd = '2')
+             FROM n_uma_race ur2
+             WHERE ur2.year = ur.year AND ur2.monthday = ur.monthday
+               AND ur2.jyocd = ur.jyocd AND ur2.kaiji = ur.kaiji
+               AND ur2.nichiji = ur.nichiji AND ur2.racenum = ur.racenum
+               AND ur2.datakubun = '7' AND ur2.ijyocd = '0'
+            ) AS prev_filly_only
         FROM n_uma_race ur
         JOIN n_race r USING (year, monthday, jyocd, kaiji, nichiji, racenum)
         WHERE ur.kettonum IN %(kettonums)s
@@ -745,15 +782,18 @@ class FeaturePipeline:
             kn = str(row["kettonum"]).strip()
             prev_trackcd = str(row.get("prev_trackcd", "")).strip()
 
-            # クラス変更の判定（簡易版）
-            # jyokencd5 の数値比較で昇降級を判定
+            # クラス変更の判定
             prev_jyoken = str(row.get("prev_jyokencd", "")).strip()
+            prev_grade = str(row.get("prev_gradecd", "")).strip()
             class_change = 0  # デフォルトは同級
 
             info: dict[str, Any] = {
                 "prev_kyori": row.get("prev_kyori"),
                 "prev_track_type": track_type(prev_trackcd),
                 "prev_jyocd": str(row.get("prev_jyocd", "")).strip(),
+                "prev_jyokencd": prev_jyoken,
+                "prev_gradecd": prev_grade,
+                "prev_filly_only": bool(row.get("prev_filly_only", False)),
                 "class_change": class_change,
                 "jockey_horse_runs": 0,
                 "jockey_horse_wins": 0,
