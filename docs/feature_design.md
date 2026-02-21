@@ -45,23 +45,31 @@ EveryDB2のPostgreSQLデータからLightGBMの特徴量を抽出する設計。
 | 15 | オッズ | 7 | odds.py | odds_tan, odds_ninki（※デフォルト除外） |
 | 16 | クロス特徴量 | 8 | pipeline.py | cross_dist_change, cross_weight_futan_per_bw |
 | 17 | レース内相対 | 36 | pipeline.py | rel_*_zscore, rel_*_rank（18指標×2） |
-| | **現行合計** | **~180** | | |
+| 18 | マイニング予想 | 7 | mining.py（サプリメント） | mining_dm_time, mining_tm_score |
+| 19 | BMS条件別 | 6 | bms_detail.py（サプリメント） | blood_bms_dist_rate, blood_father_age_rate |
+| | **現行合計** | **~192** | | ※サプリメント（Cat 18, 19）含む |
 
 ---
 
-## v2 深掘り提案サマリ（2026-02-20策定、未実装）
+## v2 深掘り提案サマリ（2026-02-20策定）
 
 重要度分析の課題: ID特徴量（trainer_code, blood_bms_id, blood_father_id, jockey_code）が上位4位を独占 → 条件別分解でID依存を減らし汎化改善。
 
-| 優先順 | 提案 | 追加数 | 実装先 | 概要 |
-|-------|------|-------|--------|------|
-| 1 | B: BMS条件別 | +6 | bloodline.py | BMS距離帯別/馬場別/競馬場別/父馬齢別/ニックス芝ダ別/父クラス別 |
-| 2 | A: 調教師条件別 | +7 | jockey_trainer.py | 芝ダ別/距離帯別/馬場別/直近30日/重賞/休み明け |
-| 3 | D: フォームモメンタム | +6 | horse.py | 着順トレンド傾斜/最終勝利日数/連続3着以内/ピーク比較/改善フラグ/昇級初戦 |
-| 4 | E: ペース構造 | +5 | pipeline.py | 逃げ先行馬数/予想ペース/脚質×ペース相性/レースレベル |
-| 5 | F: 相対特徴量拡張 | +14 | pipeline.py | 馬体重/コンビ成績/斤量比/休養日数/トレンド等のZスコア+ランク |
-| 6 | C: 騎手条件別 | +5 | jockey_trainer.py | 芝ダ別/距離帯別/直近30日/重賞 |
-| | **v2追加合計** | **+43** | | **→ 約223特徴量** |
+| 優先順 | 提案 | 追加数 | 実装先 | 状態 | 概要 |
+|-------|------|-------|--------|------|------|
+| 1 | B: BMS条件別 | +6 | bms_detail.py（サプリメント） | **実装済み** | BMS距離帯別/馬場別/競馬場別/父馬齢別/ニックス芝ダ別/父クラス別 |
+| 2 | A: 調教師条件別 | +7 | jockey_trainer.py | 未実装 | 芝ダ別/距離帯別/馬場別/直近30日/重賞/休み明け |
+| 3 | D: フォームモメンタム | +6 | horse.py | 未実装 | 着順トレンド傾斜/最終勝利日数/連続3着以内/ピーク比較/改善フラグ/昇級初戦 |
+| 4 | E: ペース構造 | +5 | pipeline.py | 未実装 | 逃げ先行馬数/予想ペース/脚質×ペース相性/レースレベル |
+| 5 | F: 相対特徴量拡張 | +14 | pipeline.py | 未実装 | 馬体重/コンビ成績/斤量比/休養日数/トレンド等のZスコア+ランク |
+| 6 | C: 騎手条件別 | +5 | jockey_trainer.py | 未実装 | 芝ダ別/距離帯別/直近30日/重賞 |
+| | **v2残り合計** | **+37** | | | **→ 約229特徴量**（B実装済み+残りA,C,D,E,F） |
+
+**提案Bの実装備考:**
+- 当初はメインパイプライン（bloodline.py）への組み込みを予定していたが、サプリメント方式で実装した
+- サプリメント方式により、メイン parquet の再構築なしに独立して構築・実験が可能
+- ノイズ抑制として MIN_SAMPLES 閾値（20、ニックスは30）+ NaN 欠損を採用（v2_proposals.md 記載の MISSING_RATE=0.0 方式から変更）
+- 使用: `--build-supplement bms_detail` で構築、`--supplement bms_detail` でマージ
 
 詳細（SQL例・算出ロジック・実装方針）は **[docs/features/v2_proposals.md](features/v2_proposals.md)** を参照。
 
@@ -127,3 +135,5 @@ LightGBM: `use_missing=true`, `zero_as_missing=false` で -1 を欠損マーカ�
 | 15. オッズ | src/features/odds.py | OddsFeatureExtractor |
 | 16. クロス特徴量 | src/features/pipeline.py | FeaturePipeline._add_cross_features() |
 | 17. レース内相対 | src/features/pipeline.py | FeaturePipeline._add_relative_features() |
+| 18. マイニング予想 | src/features/mining.py（サプリメント） | MiningFeatureExtractor |
+| 19. BMS条件別 | src/features/bms_detail.py（サプリメント） | BMSDetailFeatureExtractor |

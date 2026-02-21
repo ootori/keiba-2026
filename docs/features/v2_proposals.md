@@ -111,11 +111,17 @@ GROUP BY chokyosicode
 
 ---
 
-## 提案B: BMS（母父）条件別パフォーマンス（blood_bms_id深掘り）
+## 提案B: BMS（母父）条件別パフォーマンス（blood_bms_id深掘り） ✅ 実装済み
+
+> **実装状態:** 2026-02-21 にサプリメントとして実装完了。
+> **実装ファイル:** `src/features/bms_detail.py`（BMSDetailFeatureExtractor）
+> **テスト:** `tests/test_bms_detail_supplement.py`（10テスト）
+> **使用方法:** `--build-supplement bms_detail` で構築、`--supplement bms_detail` でマージ
 
 **目的:** blood_bms_id（重要度2位: 122868）が持つ情報を条件別に展開する。father側の6条件別特徴量に対し、BMS側は2つのみという非対称を解消する。
 
-**実装先:** `src/features/bloodline.py` の `BloodlineFeatureExtractor`
+**実装先:** `src/features/bms_detail.py`（サプリメント方式）
+※ 当初は `bloodline.py` への組み込みを予定していたが、メイン parquet の再構築なしに独立して構築・実験できるサプリメント方式を採用した。
 
 **既存との差分:** BMS側は `blood_bms_turf_rate`, `blood_bms_dirt_rate` の2つのみ。father側の `_get_sire_stats()`, `_get_sire_baba_stats()`, `_get_sire_jyo_stats()`, `_get_sire_dist_stats()` と同等のメソッドをBMS用に追加する。
 
@@ -182,29 +188,28 @@ WHERE s.fnum IN %(father_nums)s
 GROUP BY s.fnum, s.mfnum
 ```
 
-**実装方針:**
+**実装方針（実装済み — 以下は実際の実装内容）:**
 - `_get_bms_dist_stats()`, `_get_bms_baba_stats()`, `_get_bms_jyo_stats()` を追加（father版のメソッドを参考に `s.fnum` を `s.mfnum` に変更）
 - `_get_sire_age_stats()` を新規追加（`n_uma_race.barei` でフィルタ）
 - `_get_nicks_track_stats()` を新規追加（既存 `_get_nicks_stats()` を拡張、trackcdフィルタ追加）
-- `_get_sire_class_stats()` を新規追加（`n_race.jyokencd5` でクラス分類）
+- `_get_sire_class_stats()` を新規追加（`n_race.jyokencd5` + `gradecd` でクラス分類）
 - `_FEATURES` リストに6つの特徴量名を追加
-- 欠損値: `MISSING_RATE` (0.0)。相対特徴量化する場合は `missing_type="blood"`
+- **欠損値: NaN（LightGBMネイティブ欠損）** ← 当初の `MISSING_RATE=0.0` からNaNに変更。サンプル不足と複勝率0%を区別するため
+- **ノイズ抑制: MIN_SAMPLES=20、MIN_SAMPLES_NICKS=30。** サンプル数が閾値未満の場合はNaNを返す（小サンプルの率 1/1=100% 等を除去）
 
-**クラス分類の定義（B6用）:**
+**クラス分類の定義（B6用 — 実装版）:**
 ```python
-def classify_class(jyokencd5: str) -> str:
-    """JyokenCD5からクラスを分類する."""
-    cd = int(jyokencd5) if jyokencd5.strip() else 0
-    if cd >= 999:  # OP（オープン）
-        return "open"
-    elif cd >= 900:  # OP（条件付き）
-        return "open"
-    elif cd >= 700:  # 条件戦（新馬・未勝利〜3勝クラス）
-        return "jouken"
-    else:
-        return "other"
+def _classify_class(gradecd: str, jyokencd5: str) -> str:
+    """GradeCD と JyokenCD5 からクラスを分類する."""
+    gradecd = (gradecd or "").strip()
+    if gradecd in ("A", "B", "C", "D"):
+        return "grade"   # 重賞
+    cd = int(jyokencd5) if (jyokencd5 or "").strip() else 0
+    if cd >= 500:
+        return "open"    # オープン
+    return "jouken"      # 条件戦
 ```
-※ 重賞は `GradeCD` で判定（A-D = 重賞）。クラスの細分化は実装時にDBの値を確認して調整すること。
+※ 当初設計から変更: GradeCD による重賞判定を追加し、JyokenCD5 の閾値を 500 に調整。
 
 ---
 
@@ -411,27 +416,28 @@ def add_pace_features(df: pd.DataFrame) -> pd.DataFrame:
 
 コスト対効果と依存関係を考慮した推奨実装順序:
 
-| 順位 | 提案 | 追加特徴量数 | 実装コスト | 期待効果 | 理由 |
-|-----|------|-----------|----------|---------|------|
-| 1 | B: BMS条件別 | 6 | 中 | 高 | 重要度2位のID依存を解消。father版の実装パターンが流用可能 |
-| 2 | A: 調教師条件別 | 7 | 中 | 高 | 重要度1位のID依存を解消。同様のクエリパターン |
-| 3 | D: フォームモメンタム | 6 | 低 | 中〜高 | 既存DataFrameから算出、新規SQL最小 |
-| 4 | E: ペース構造 | 5 | 低 | 中 | 既存特徴量の集計のみ、SQL不要 |
-| 5 | F: 相対特徴量拡張 | 7 | 極低 | 中 | タプル追加のみ（A,B,D完了後にF5-F7も追加） |
-| 6 | C: 騎手条件別 | 5 | 中 | 中 | A,Bと同構造だが重要度が若干低い |
+| 順位 | 提案 | 追加特徴量数 | 実装コスト | 期待効果 | 状態 | 理由 |
+|-----|------|-----------|----------|---------|------|------|
+| 1 | B: BMS条件別 | 6 | 中 | 高 | **✅ 実装済み** | 重要度2位のID依存を解消。サプリメント方式で実装 |
+| 2 | A: 調教師条件別 | 7 | 中 | 高 | 未実装 | 重要度1位のID依存を解消。同様のクエリパターン |
+| 3 | D: フォームモメンタム | 6 | 低 | 中〜高 | 未実装 | 既存DataFrameから算出、新規SQL最小 |
+| 4 | E: ペース構造 | 5 | 低 | 中 | 未実装 | 既存特徴量の集計のみ、SQL不要 |
+| 5 | F: 相対特徴量拡張 | 7 | 極低 | 中 | 未実装 | タプル追加のみ（A,B,D完了後にF5-F7も追加） |
+| 6 | C: 騎手条件別 | 5 | 中 | 中 | 未実装 | A,Bと同構造だが重要度が若干低い |
 
-**合計: 36特徴量追加 → 約194特徴量**
+**残り追加: +37特徴量（A+C+D+E+F）→ 全v2完成時 約229特徴量**
+（B実装済みの現行: 約192特徴量）
 
 ## サプリメント vs メインパイプライン
 
-- **提案A, B, C:** メインパイプラインに組み込む（既存のExtractorクラスに追加メソッドを実装）。理由: 既存の `extract()` 内でレース情報を取得済みで、それを条件別クエリに渡すため
+- **提案B:** ✅ **サプリメントとして実装済み**（`bms_detail.py` → `BMSDetailFeatureExtractor`）。当初はメインパイプラインへの組み込みを予定していたが、メイン parquet の再構築なしに独立して構築・実験できるサプリメント方式を採用した
+- **提案A, C:** メインパイプラインに組み込む（既存のExtractorクラスに追加メソッドを実装）。理由: 既存の `extract()` 内でレース情報を取得済みで、それを条件別クエリに渡すため。または提案Bと同様にサプリメント方式も検討可
 - **提案D:** メインパイプラインに組み込む（`horse.py` の `_calc_past_performance()` に追加ロジック）
 - **提案E:** メインパイプラインに組み込む（`pipeline.py` のクロス特徴量に追加）
 - **提案F:** メインパイプラインに組み込む（`pipeline.py` の `_RELATIVE_TARGETS` にタプル追加）
-- **全提案共通:** メインパイプラインへの組み込みのため、parquet の `--force-rebuild` が必要
 
 ## parquet再構築時の注意
 
-全提案がメインパイプラインへの組み込みのため:
-- 実装後に `python run_train.py --build-features-only --force-rebuild --workers 4` で全年度を再構築する必要がある
+- **サプリメント（提案B等）:** メイン parquet の再構築は不要。`--build-supplement {name} --force-rebuild` でサプリメントのみ再構築し、`--supplement {name}` で学習/評価時にマージする
+- **メインパイプライン組み込み（提案A,C,D,E,F）:** 実装後に `python run_train.py --build-features-only --force-rebuild --workers 4` で全年度を再構築する必要がある
 - 段階的に実装する場合は、各提案の実装完了ごとに対象年度のみ再構築可能（例: `--train-start 2025 --train-end 2025 --force-rebuild` で検証年度のみ先行確認）

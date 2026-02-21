@@ -48,6 +48,7 @@ everydb2/
 │   │   ├── bloodline.py              # 血統（カテゴリ13）
 │   │   ├── odds.py                   # オッズ・人気（カテゴリ15）
 │   │   ├── mining.py                # JRA-VANデータマイニング予想（カテゴリ18: サプリメント）
+│   │   ├── bms_detail.py            # BMS条件別パフォーマンス（v2提案B: サプリメント）
 │   │   ├── supplement.py            # 差分特徴量（サプリメント）パイプライン
 │   │   └── pipeline.py              # 特徴量パイプライン統合+クロス特徴量（カテゴリ16）
 │   ├── model/
@@ -65,10 +66,12 @@ everydb2/
 ├── data/                             # 中間データキャッシュ（*.parquet, base_time_table.csv）
 │   └── supplements/                  # サプリメント（差分特徴量）保存先
 │       ├── mining_2024.parquet       #   マイニング特徴量（年度別）
+│       ├── bms_detail_2024.parquet   #   BMS条件別特徴量（年度別）
 │       └── ...
 └── tests/
     ├── test_features.py              # 30テスト（pytest）
-    └── test_mining_supplement.py     # マイニング・サプリメントテスト（16テスト）
+    ├── test_mining_supplement.py     # マイニング・サプリメントテスト（16テスト）
+    └── test_bms_detail_supplement.py # BMS条件別サプリメントテスト（10テスト）
 ```
 
 ## データベース接続
@@ -165,23 +168,24 @@ everydb2/
 16. **クロス特徴量(8):** 距離変更, 芝ダ変更, クラス変更, 斤量/体重比
 17. **レース内相対特徴量(36):** 主要能力指標のレース内Zスコア・ランク（血統4指標追加）
 18. **マイニング予想(7):** DM予想タイム, DM予想順位, DM誤差幅, 対戦型スコア（サプリメント）
+19. **BMS条件別(6):** BMS距離帯別/馬場別/競馬場別/父馬齢別/ニックス芝ダ別/父クラス別（サプリメント）
 
-合計 **約180特徴量**（詳細は `docs/feature_design.md` 参照）
+合計 **約192特徴量**（v1: ~180 + マイニング: 7 + BMS条件別: 6 ※サプリメント含む。詳細は `docs/feature_design.md` 参照）
 
-### v2 深掘り提案（2026-02-20策定、未実装）
+### v2 深掘り提案（2026-02-20策定）
 
 重要度分析に基づく追加特徴量（詳細は `docs/feature_design.md` の「特徴量深掘り提案（v2）」セクション参照）:
 
-| 提案 | 追加数 | 実装先 | 概要 |
-|-----|-------|--------|------|
-| A: 調教師条件別 | +7 | jockey_trainer.py | 芝ダ別/距離帯別/馬場別/直近30日/重賞/休み明け |
-| B: BMS条件別 | +6 | bloodline.py | BMS距離帯別/馬場別/競馬場別/父馬齢別/ニックス芝ダ別/父クラス別 |
-| C: 騎手条件別 | +5 | jockey_trainer.py | 芝ダ別/距離帯別/直近30日/重賞 |
-| D: フォームモメンタム | +6 | horse.py | 着順トレンド傾斜/最終勝利日数/連続3着以内/ピーク比較/改善フラグ/昇級初戦 |
-| E: ペース構造 | +5 | pipeline.py | 逃げ先行馬数/予想ペース/脚質×ペース相性/レースレベル |
-| F: 相対特徴量拡張 | +14 | pipeline.py | 馬体重/コンビ成績/斤量比/休養日数/トレンド等のZスコア+ランク |
+| 提案 | 追加数 | 実装先 | 状態 | 概要 |
+|-----|-------|--------|------|------|
+| B: BMS条件別 | +6 | bms_detail.py（サプリメント） | **実装済み** | BMS距離帯別/馬場別/競馬場別/父馬齢別/ニックス芝ダ別/父クラス別 |
+| A: 調教師条件別 | +7 | jockey_trainer.py | 未実装 | 芝ダ別/距離帯別/馬場別/直近30日/重賞/休み明け |
+| D: フォームモメンタム | +6 | horse.py | 未実装 | 着順トレンド傾斜/最終勝利日数/連続3着以内/ピーク比較/改善フラグ/昇級初戦 |
+| E: ペース構造 | +5 | pipeline.py | 未実装 | 逃げ先行馬数/予想ペース/脚質×ペース相性/レースレベル |
+| F: 相対特徴量拡張 | +14 | pipeline.py | 未実装 | 馬体重/コンビ成績/斤量比/休養日数/トレンド等のZスコア+ランク |
+| C: 騎手条件別 | +5 | jockey_trainer.py | 未実装 | 芝ダ別/距離帯別/直近30日/重賞 |
 
-実装優先順位: B → A → D → E → F → C
+実装優先順位: ~~B~~ → A → D → E → F → C
 
 ## コーディング規約
 
@@ -283,8 +287,14 @@ python run_train.py --eval-only --supplement mining
 # フル実行 + マイニングサプリメント
 python run_train.py --supplement mining
 
-# 複数サプリメントを同時にマージ（将来拡張用）
-python run_train.py --train-only --supplement mining pace
+# BMS条件別特徴量をサプリメントとして構築
+python run_train.py --build-supplement bms_detail --force-rebuild
+
+# BMS条件別をマージして学習
+python run_train.py --train-only --supplement bms_detail
+
+# 複数サプリメントを同時にマージ
+python run_train.py --train-only --supplement mining bms_detail
 ```
 
 ## 特徴量の年度別保存と並列構築
@@ -304,6 +314,8 @@ data/
 ├── supplements/             # サプリメント（差分特徴量）
 │   ├── mining_2015.parquet  #   マイニング特徴量
 │   ├── mining_2016.parquet
+│   ├── bms_detail_2015.parquet  # BMS条件別特徴量
+│   ├── bms_detail_2016.parquet
 │   └── ...
 ├── features_2025.parquet
 ├── train_features.parquet   # 旧方式（後方互換、--train-only/--eval-only のフォールバック用）
@@ -338,6 +350,7 @@ data/
 
 **サプリメント登録簿（supplement.py）:**
 - `mining`: JRA-VANデータマイニング予想特徴量（MiningFeatureExtractor）
+- `bms_detail`: BMS条件別パフォーマンス特徴量（BMSDetailFeatureExtractor）
 - 新しいサプリメントを追加するには `_get_registry()` に登録
 
 **API:**
@@ -363,6 +376,30 @@ JRA-VANが提供するデータマイニング予想を特徴量として活用�
 - DMKubun が 1=前日、2=当日、3=直前。データリーク防止の観点からタイミングに注意
 - n_uma_race の DM カラムを優先取得し、n_mining テーブルで補完
 - n_mining / n_taisengata_mining は横持ちデータのため、スキーマから動的に縦持ちに変換
+
+### BMS条件別特徴量（カテゴリ19 / v2提案B）
+
+blood_bms_id（重要度2位）が持つ情報を条件別に展開するサプリメント。
+father側の6条件別特徴量に対し、BMS側は2つのみという非対称を解消する。
+
+| 特徴量名 | 説明 | データソース |
+|---------|------|------------|
+| `blood_bms_dist_rate` | 母父産駒の今回距離帯での複勝率（過去3年） | n_sanku + n_uma_race + n_race |
+| `blood_bms_baba_rate` | 母父産駒の今回馬場状態での複勝率（過去3年） | n_sanku + n_uma_race + n_race |
+| `blood_bms_jyo_rate` | 母父産駒の今回競馬場での複勝率（過去3年） | n_sanku + n_uma_race + n_race |
+| `blood_father_age_rate` | 父産駒の同馬齢での複勝率（過去5年） | n_sanku + n_uma_race |
+| `blood_nicks_track_rate` | 父×母父ニックスの芝/ダート別複勝率（過去5年） | n_sanku + n_uma_race + n_race |
+| `blood_father_class_rate` | 父産駒のクラス別成績（過去3年） | n_sanku + n_uma_race + n_race |
+
+**ノイズ抑制策:**
+- 最小サンプル数閾値: `MIN_SAMPLES=20`（一般）, `MIN_SAMPLES_NICKS=30`（ニックス）
+- サンプル不足の場合は NaN を返す（`MISSING_RATE=0.0` ではなく LightGBM ネイティブ欠損）
+- これにより「データなし」と「複勝率0%」を区別し、小サンプル由来のノイジーな率（1/1=100%等）を除去
+
+**クラス分類（blood_father_class_rate用）:**
+- GradeCD が A-D → `"grade"`（重賞）
+- JyokenCD5 >= 500 → `"open"`（オープン）
+- それ以外 → `"jouken"`（条件戦）
 
 ## LightGBM categorical_feature の注意
 
@@ -397,6 +434,7 @@ JRA-VANが提供するデータマイニング予想を特徴量として活用�
 - **value_bet のEV閾値とベット上限:** デフォルトで `ev_threshold=1.2`（マージン確保）、`max_bets_per_race=3`（ベット数膨張防止）。`value_bet_config` 辞書で設定変更可能
 - **value_bet のオッズ取得:** `value_bet` 戦略は特徴量の `odds_tan` を優先し、欠損時（オッズ特徴量未使用時）は `n_odds_tanpuku` テーブルからレース単位で単勝オッズを取得する。これにより `--with-odds` なしでも value_bet が動作する
 - **MISSING_RATE=0.0 の特徴量ごとの意味の違い:** `_add_relative_features()` では `missing_type` パラメータで欠損値処理を3パターンに分類している。rate系特徴量（勝率・複勝率等）では0.0は「0%」という正当な値であり、NaN化すると弱い馬のZスコアが平均に引き上げられ性能が低下する。新しい相対特徴量を追加する際は `missing_type` を必ず適切に設定すること（"numeric"/"rate"/"blood"）
+- **サプリメント特徴量の欠損値戦略:** `bms_detail` サプリメントでは `MISSING_RATE=0.0` ではなく `NaN`（LightGBMネイティブ欠損）を使用している。率系特徴量（複勝率）で「サンプル数不足（MIN_SAMPLES未満）でデータなし」と「本当に複勝率0%」を区別するため。新しいサプリメントで率系特徴量を追加する場合も、同様に最小サンプル数閾値 + NaN 方式を推奨
 - **高カーディナリティIDの特徴量除外:** `blood_mother_id`（母馬繁殖登録番号）は数千種のユニーク値を持つため特徴量から削除した。カテゴリ変数では過学習し、数値変数ではID番号の大小に意味がないため分割が無意味になる。母馬の情報は `blood_mother_keito`（母系統）と `blood_mother_produce_rate`（母産駒成績）でカバーしている。同様に、LightGBMの `categorical_feature` に指定するのはユニーク数が数十〜100程度までのカラムに限定すること
 
 ## 回収率シミュレーション戦略
