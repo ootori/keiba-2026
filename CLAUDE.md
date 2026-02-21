@@ -145,6 +145,7 @@ everydb2/
 - 学習: 2015-2024年（10年分）
 - 検証: 2025年
 - 時系列で分割し、未来のデータが学習に混入しないことを保証
+- **一括構築・分割方式:** 特徴量構築は学習期間〜検証年（2015-2025）を一括で `build_years()` に渡し、構築後に `_key_year` で学習/検証に分割する。これにより検証年も `--workers N` の並列構築対象となる。また本番運用時（例: 2016-2025学習 → 2026予測）でも同一フォーマットのparquetを再利用できる
 
 ## 特徴量カテゴリ（概要）
 
@@ -227,14 +228,17 @@ python run_train.py --train-start 2024 --train-end 2024 --valid-year 2025
 # 特徴量構築のみ（parquet保存まで）
 python run_train.py --build-features-only
 
-# 4並列で特徴量構築（年度別に並列実行）
+# 4並列で特徴量構築（学習期間〜検証年を一括並列実行）
 python run_train.py --build-features-only --workers 4
 
 # 既存parquetを無視して全年度を再構築（8並列）
 python run_train.py --build-features-only --workers 8 --force-rebuild
 
 # 特定年度だけ再構築（他の年はスキップ）
-python run_train.py --build-features-only --train-start 2020 --train-end 2020 --force-rebuild
+python run_train.py --build-features-only --train-start 2020 --train-end 2020 --valid-year 2020 --force-rebuild
+
+# 本番運用向け: 2016-2025で学習し2026年を予測する場合の特徴量構築
+python run_train.py --build-features-only --train-start 2016 --train-end 2025 --valid-year 2025 --workers 4
 
 # 既存特徴量からモデル学習のみ
 python run_train.py --train-only
@@ -269,7 +273,7 @@ python run_train.py --target win --train-only --model-name win_model
 python run_train.py --eval-only --model-name win_model
 
 # === サプリメント（差分特徴量）===
-# マイニング特徴量をサプリメントとして構築（メインparquetの再構築不要）
+# マイニング特徴量をサプリメントとして構築（学習期間〜検証年を一括構築）
 python run_train.py --build-supplement mining
 
 # 4並列でサプリメント構築
@@ -303,7 +307,7 @@ python run_train.py --train-only --supplement mining bms_detail
 これにより以下の利点がある:
 
 - **差分再構築:** 特徴量設計を変更した場合、変更が必要な年度だけ `--force-rebuild` で再構築できる
-- **並列構築:** `--workers N` で N 年分を同時に構築でき、10年分の構築時間を大幅に短縮
+- **並列構築:** `--workers N` で N 年分を同時に構築でき、学習+検証の全年度（例: 11年分）の構築時間を大幅に短縮
 - **増分追加:** 新年度のデータが追加された場合、その年度だけ構築すればよい
 
 ```

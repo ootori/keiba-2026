@@ -162,49 +162,63 @@ def step_check_db() -> bool:
     return True
 
 
+def _split_train_valid(
+    all_df: pd.DataFrame,
+    valid_year: str,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """全年度 DataFrame を学習/検証に分割する.
+
+    Args:
+        all_df: 全年度を結合した DataFrame（_key_year カラム必須）
+        valid_year: 検証年（この年度のデータが検証用になる）
+
+    Returns:
+        (train_df, valid_df) のタプル
+    """
+    mask = all_df["_key_year"] == valid_year
+    valid_df = all_df[mask].copy()
+    train_df = all_df[~mask].copy()
+    return train_df, valid_df
+
+
 def step_build_features(
     args: argparse.Namespace,
     include_odds: bool,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Step 1: 特徴量構築（年度別 parquet 方式）."""
+    """Step 1: 特徴量構築（年度別 parquet 方式）.
+
+    学習期間〜検証年を一括で構築し、_key_year で分割する。
+    これにより検証年も並列構築の恩恵を受けられる。
+    """
     logger.info("=" * 60)
     logger.info("Step 1: 特徴量構築（年度別, workers=%d）", args.workers)
     logger.info("=" * 60)
 
     supplement_names = args.supplement or []
 
-    # 学習データ（複数年）
-    logger.info("学習データ構築中 (%s〜%s)...", args.train_start, args.train_end)
-    train_df = FeaturePipeline.build_years(
+    # 学習期間〜検証年を一括構築
+    logger.info(
+        "全年度構築中 (%s〜%s, 検証=%s)...",
+        args.train_start, args.valid_year, args.valid_year,
+    )
+    all_df = FeaturePipeline.build_years(
         year_start=args.train_start,
-        year_end=args.train_end,
+        year_end=args.valid_year,
         include_odds=include_odds,
         workers=args.workers,
         force_rebuild=args.force_rebuild,
     )
-    # サプリメントマージ
+
+    # サプリメントマージ（一括）
     if supplement_names:
         from src.features.supplement import merge_supplements
-        train_df = merge_supplements(
-            train_df, supplement_names,
-            args.train_start, args.train_end,
+        all_df = merge_supplements(
+            all_df, supplement_names,
+            args.train_start, args.valid_year,
         )
 
-    # 検証データ（1年分）
-    logger.info("検証データ構築中 (%s)...", args.valid_year)
-    valid_df = FeaturePipeline.build_years(
-        year_start=args.valid_year,
-        year_end=args.valid_year,
-        include_odds=include_odds,
-        workers=1,  # 1年分なので直列で十分
-        force_rebuild=args.force_rebuild,
-    )
-    if supplement_names:
-        from src.features.supplement import merge_supplements
-        valid_df = merge_supplements(
-            valid_df, supplement_names,
-            args.valid_year, args.valid_year,
-        )
+    # 学習/検証に分割
+    train_df, valid_df = _split_train_valid(all_df, args.valid_year)
 
     logger.info("学習データ: %d行, 検証データ: %d行", len(train_df), len(valid_df))
     return train_df, valid_df
@@ -216,21 +230,19 @@ def step_load_features(
     """既存の特徴量 parquet を読み込む.
 
     年度別 parquet（features_{year}.parquet）を優先してロードする。
+    学習期間〜検証年を一括ロードし、_key_year で分割する。
     見つからない場合は旧方式（train_features.parquet / valid_features.parquet）を試みる。
     --supplement が指定されている場合はサプリメントもマージする。
     """
     supplement_names = args.supplement or []
 
-    # 年度別 parquet の存在チェック
+    # 年度別 parquet の存在チェック（一括ロード → 分割）
     try:
-        train_df = FeaturePipeline.load_years(
-            args.train_start, args.train_end,
+        all_df = FeaturePipeline.load_years(
+            args.train_start, args.valid_year,
             supplement_names=supplement_names,
         )
-        valid_df = FeaturePipeline.load_years(
-            args.valid_year, args.valid_year,
-            supplement_names=supplement_names,
-        )
+        train_df, valid_df = _split_train_valid(all_df, args.valid_year)
         logger.info(
             "年度別ロード完了: 学習=%d行, 検証=%d行",
             len(train_df), len(valid_df),
@@ -454,20 +466,12 @@ def step_build_supplements(args: argparse.Namespace) -> None:
         logger.info("サプリメント構築: %s", name)
         logger.info("=" * 60)
 
-        # 学習期間
+        # 学習期間〜検証年を一括構築
         build_supplement_years(
             supplement_name=name,
             year_start=args.train_start,
-            year_end=args.train_end,
-            workers=args.workers,
-            force_rebuild=args.force_rebuild,
-        )
-        # 検証期間
-        build_supplement_years(
-            supplement_name=name,
-            year_start=args.valid_year,
             year_end=args.valid_year,
-            workers=1,
+            workers=args.workers,
             force_rebuild=args.force_rebuild,
         )
 
