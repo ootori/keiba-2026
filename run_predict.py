@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from src.config import ODDS_CORRECTION_STATS_PATH
 from src.db import check_connection
 from src.model.predictor import Predictor
 
@@ -58,7 +59,77 @@ def parse_args() -> argparse.Namespace:
         default="model",
         help="モデル名（デフォルト: model）",
     )
+    parser.add_argument(
+        "--odds-correction",
+        action="store_true",
+        help="オッズ歪み補正を適用したEV情報を表示",
+    )
     return parser.parse_args()
+
+
+def _load_odds_correction_config(args: argparse.Namespace) -> dict | None:
+    """オッズ補正設定をロードする."""
+    if not args.odds_correction:
+        return None
+
+    if ODDS_CORRECTION_STATS_PATH.exists():
+        from src.odds_correction_stats import load_odds_correction_stats
+        config = load_odds_correction_stats()
+        logger.info("オッズ補正統計をロード")
+        return config
+
+    logger.warning(
+        "統計JSONが見つかりません (%s)。"
+        " run_train.py --build-odds-stats で統計を構築してください。",
+        ODDS_CORRECTION_STATS_PATH,
+    )
+    return None
+
+
+def _format_ev_info(
+    prediction: pd.DataFrame,
+    race_key: dict[str, str],
+    odds_correction_config: dict,
+) -> str:
+    """オッズ補正後のEV情報を表示する."""
+    from src.model.evaluator import ModelEvaluator
+
+    evaluator = ModelEvaluator()
+    odds_dict = evaluator._get_odds_from_db(race_key)
+    if not odds_dict:
+        return "  (オッズ取得不可)"
+
+    ninki_ranks = evaluator._derive_ninki_rank(odds_dict)
+
+    lines: list[str] = []
+    lines.append("")
+    lines.append(f"{'馬番':>4s}  {'オッズ':>6s}  {'補正後':>6s}  {'確率':>5s}  {'EV':>5s}")
+    lines.append("-" * 38)
+
+    for _, row in prediction.iterrows():
+        umaban = str(row.get("umaban", "")).strip().zfill(2)
+        pred_prob = row["pred_prob"]
+        raw_odds = odds_dict.get(umaban, 0.0)
+        if raw_odds <= 0:
+            continue
+
+        ninki = ninki_ranks.get(umaban, 99)
+        import pandas as pd
+        dummy_row = pd.Series({"post_umaban": int(umaban)})
+        corrected_odds = evaluator._apply_odds_correction(
+            raw_odds, dummy_row, ninki, odds_correction_config,
+        )
+        ev = pred_prob * corrected_odds
+
+        marker = " *" if ev >= 1.2 else ""
+        lines.append(
+            f"{umaban:>4s}  {raw_odds:>6.1f}  {corrected_odds:>6.1f}  "
+            f"{pred_prob * 100:>4.1f}%  {ev:>5.2f}{marker}"
+        )
+
+    lines.append("")
+    lines.append("* = EV >= 1.2（value_bet候補）")
+    return "\n".join(lines)
 
 
 def main() -> None:
@@ -68,6 +139,9 @@ def main() -> None:
     if not check_connection():
         logger.error("DB接続に失敗しました。")
         sys.exit(1)
+
+    # オッズ補正設定
+    odds_correction_config = _load_odds_correction_config(args)
 
     # 予測器の初期化
     predictor = Predictor(
@@ -105,6 +179,11 @@ def main() -> None:
                 }
                 output = predictor.format_prediction(race_key_for_format, pred)
                 print(output)
+                if odds_correction_config:
+                    ev_info = _format_ev_info(
+                        pred, race_key_for_format, odds_correction_config,
+                    )
+                    print(ev_info)
                 print()
 
     else:
@@ -133,6 +212,11 @@ def main() -> None:
         output = predictor.format_prediction(race_key, prediction)
         print()
         print(output)
+        if odds_correction_config:
+            ev_info = _format_ev_info(
+                prediction, race_key, odds_correction_config,
+            )
+            print(ev_info)
         print()
 
 

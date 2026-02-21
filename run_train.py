@@ -46,6 +46,8 @@ from src.config import (
     DATA_DIR,
     MODEL_DIR,
     LGBM_PARAMS,
+    DEFAULT_ODDS_CORRECTION_CONFIG,
+    ODDS_CORRECTION_STATS_PATH,
 )
 from src.db import check_connection, get_table_counts
 from src.features.pipeline import FeaturePipeline
@@ -141,7 +143,54 @@ def parse_args() -> argparse.Namespace:
         metavar="NAME",
         help="学習/評価時にマージするサプリメント名（例: --supplement mining）",
     )
+    parser.add_argument(
+        "--odds-correction",
+        action="store_true",
+        help="value_bet戦略でオッズ歪み補正を有効化（統計JSON自動ロード）",
+    )
+    parser.add_argument(
+        "--build-odds-stats",
+        action="store_true",
+        help="DBからオッズ補正統計を算出してJSONに保存",
+    )
+    parser.add_argument(
+        "--odds-stats-start",
+        default="2022",
+        help="オッズ統計の集計開始年（デフォルト: 2022）",
+    )
+    parser.add_argument(
+        "--odds-stats-end",
+        default="2024",
+        help="オッズ統計の集計終了年（デフォルト: 2024）",
+    )
     return parser.parse_args()
+
+
+def _build_odds_correction_config(args: argparse.Namespace) -> dict | None:
+    """CLIオプションからオッズ補正設定を構築する.
+
+    統計JSONが存在すれば自動ロード、なければハードコードのフォールバック。
+    """
+    if not args.odds_correction:
+        return None
+
+    # 統計JSONからロードを試みる
+    if ODDS_CORRECTION_STATS_PATH.exists():
+        from src.odds_correction_stats import load_odds_correction_stats
+        config = load_odds_correction_stats()
+        logger.info("統計JSONからオッズ補正設定をロード")
+        return config
+
+    # フォールバック: ハードコードのデフォルト設定
+    logger.warning(
+        "統計JSONが見つかりません (%s)。"
+        "ハードコードのデフォルト設定を使用します。"
+        " --build-odds-stats で統計を構築してください。",
+        ODDS_CORRECTION_STATS_PATH,
+    )
+    config = dict(DEFAULT_ODDS_CORRECTION_CONFIG)
+    config["enabled"] = True
+    return config
 
 
 def step_check_db() -> bool:
@@ -287,11 +336,13 @@ def step_train(
     model_name: str,
     ranking: bool = False,
     target_type: str = "top3",
+    odds_correction_config: dict | None = None,
 ) -> None:
     """Step 2: モデル学習 + 評価.
 
     Args:
         target_type: "top3"=3着以内, "win"=1着
+        odds_correction_config: オッズ歪み補正設定
     """
     # 目的変数カラムの決定
     target_col = "target_win" if target_type == "win" else "target"
@@ -372,6 +423,7 @@ def step_train(
             valid_df, trainer.feature_columns, model,
             strategy=strategy, ranking=ranking,
             target_type=target_type,
+            odds_correction_config=odds_correction_config,
         )
         logger.info(
             "  [%s] 回収率: %.1f%%, 的中率: %.1f%% (%d/%d)",
@@ -402,6 +454,9 @@ def step_eval_only(args: argparse.Namespace) -> None:
     # 目的変数カラムの決定
     target_col = "target_win" if target_type == "win" else "target"
     valid_df = valid_df.dropna(subset=[target_col]).copy()
+
+    # オッズ補正設定
+    odds_correction_config = _build_odds_correction_config(args)
 
     # 評価
     logger.info("=" * 60)
@@ -435,6 +490,7 @@ def step_eval_only(args: argparse.Namespace) -> None:
             valid_df, trainer.feature_columns, model,
             strategy=strategy, ranking=ranking,
             target_type=target_type,
+            odds_correction_config=odds_correction_config,
         )
         logger.info(
             "  [%s] 回収率: %.1f%%, 的中率: %.1f%% (%d/%d)",
@@ -444,6 +500,24 @@ def step_eval_only(args: argparse.Namespace) -> None:
             result["win_count"],
             result["bet_count"],
         )
+
+
+def step_build_odds_stats(args: argparse.Namespace) -> None:
+    """オッズ補正統計をDBから算出してJSONに保存する."""
+    from src.odds_correction_stats import (
+        build_odds_correction_stats,
+        save_odds_correction_stats,
+    )
+
+    logger.info("=" * 60)
+    logger.info("オッズ補正統計構築: %s〜%s年", args.odds_stats_start, args.odds_stats_end)
+    logger.info("=" * 60)
+
+    stats = build_odds_correction_stats(
+        year_start=args.odds_stats_start,
+        year_end=args.odds_stats_end,
+    )
+    save_odds_correction_stats(stats)
 
 
 def step_build_supplements(args: argparse.Namespace) -> None:
@@ -488,6 +562,13 @@ def main() -> None:
 
     target_type = args.target
 
+    # オッズ補正統計構築モード
+    if args.build_odds_stats:
+        step_build_odds_stats(args)
+        if not args.train_only and not args.eval_only and not args.build_features_only:
+            logger.info("完了!")
+            return
+
     # サプリメント構築モード
     if args.build_supplement:
         step_build_supplements(args)
@@ -495,6 +576,8 @@ def main() -> None:
             # --build-supplement のみの場合はここで終了
             logger.info("完了!")
             return
+
+    odds_correction_config = _build_odds_correction_config(args)
 
     if args.eval_only:
         # 評価・回収率シミュレーションのみ
@@ -506,6 +589,7 @@ def main() -> None:
         step_train(
             train_df, valid_df, args.model_name,
             ranking=ranking, target_type=target_type,
+            odds_correction_config=odds_correction_config,
         )
 
     elif args.build_features_only:
@@ -518,6 +602,7 @@ def main() -> None:
         step_train(
             train_df, valid_df, args.model_name,
             ranking=ranking, target_type=target_type,
+            odds_correction_config=odds_correction_config,
         )
 
     logger.info("完了!")

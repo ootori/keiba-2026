@@ -215,6 +215,7 @@ class ModelEvaluator:
         ranking: bool = False,
         target_type: str = "top3",
         value_bet_config: dict[str, Any] | None = None,
+        odds_correction_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """回収率シミュレーションを実行する.
 
@@ -241,6 +242,9 @@ class ModelEvaluator:
             value_bet_config: value_bet戦略の設定
                 - ev_threshold: 期待値閾値（デフォルト1.2）
                 - max_bets_per_race: 最大単勝ベット数（デフォルト3）
+            odds_correction_config: オッズ歪み補正設定（value_bet時のみ有効）
+                - enabled: 補正を有効化するか
+                - rules: 補正ルール辞書
 
         Returns:
             回収率シミュレーション結果
@@ -265,6 +269,12 @@ class ModelEvaluator:
         # 全モデルタイプで正規化が必要
         is_value_bet = strategy in ("value_bet_tansho", "value_bet_umaren")
         if is_value_bet:
+            if odds_correction_config and odds_correction_config.get("enabled"):
+                rules = odds_correction_config.get("rules", {})
+                logger.info(
+                    "value_bet: オッズ歪み補正 有効（ルール数=%d）",
+                    len(rules),
+                )
             if target_type == "win":
                 # P(win) モデル: ratio正規化で合計1.0にする
                 logger.info("value_bet: P(win)モデル — ratio正規化")
@@ -314,6 +324,7 @@ class ModelEvaluator:
                     group, harai_data, race_key_vals,
                     ev_threshold=vb_config["ev_threshold"],
                     max_bets=vb_config["max_bets_per_race"],
+                    odds_correction_config=odds_correction_config,
                 )
             else:
                 strategy_map = {
@@ -464,6 +475,7 @@ class ModelEvaluator:
         race_key: dict[str, str],
         ev_threshold: float = 1.2,
         max_bets: int = 3,
+        odds_correction_config: dict[str, Any] | None = None,
     ) -> list[str]:
         """EV条件を満たす馬番リストを返す（value_bet共通ロジック）.
 
@@ -472,11 +484,15 @@ class ModelEvaluator:
 
         オッズは特徴量データ（odds_tan）を優先し、
         欠損時は n_odds_tanpuku テーブルから取得する。
+
+        odds_correction_config が有効な場合、EV計算前にオッズを補正する。
         """
         odds_from_db: dict[str, float] | None = None
         has_odds_col = "odds_tan" in group.columns
 
-        candidates: list[tuple[str, float]] = []  # (umaban, ev)
+        # --- Phase 1: 全馬のオッズを収集 ---
+        horse_odds: dict[str, float] = {}  # umaban → odds
+        horse_rows: list[tuple[str, pd.Series, float]] = []  # (umaban, row, pred_prob)
 
         for _, row in group.iterrows():
             pred_prob = row.get("pred_prob", 0)
@@ -503,9 +519,30 @@ class ModelEvaluator:
                 odds_tan = odds_from_db.get(umaban, 0.0)
 
             if odds_tan > 0:
-                ev = pred_prob * odds_tan
-                if ev >= ev_threshold:
-                    candidates.append((umaban, ev))
+                horse_odds[umaban] = odds_tan
+            horse_rows.append((umaban, row, pred_prob))
+
+        # --- Phase 2: 人気順を導出（補正ルールで使用） ---
+        ninki_ranks = self._derive_ninki_rank(horse_odds)
+
+        # --- Phase 3: 補正適用 & EV計算 ---
+        candidates: list[tuple[str, float]] = []  # (umaban, ev)
+
+        for umaban, row, pred_prob in horse_rows:
+            odds_tan = horse_odds.get(umaban, 0.0)
+            if odds_tan <= 0:
+                continue
+
+            # オッズ補正を適用
+            if odds_correction_config:
+                ninki = ninki_ranks.get(umaban, 99)
+                odds_tan = self._apply_odds_correction(
+                    odds_tan, row, ninki, odds_correction_config,
+                )
+
+            ev = pred_prob * odds_tan
+            if ev >= ev_threshold:
+                candidates.append((umaban, ev))
 
         candidates.sort(key=lambda x: x[1], reverse=True)
         return [c[0] for c in candidates[:max_bets]]
@@ -517,6 +554,7 @@ class ModelEvaluator:
         race_key: dict[str, str],
         ev_threshold: float = 1.2,
         max_bets: int = 3,
+        odds_correction_config: dict[str, Any] | None = None,
     ) -> dict[str, int]:
         """期待値ベースで単勝を購入する.
 
@@ -524,6 +562,7 @@ class ModelEvaluator:
         """
         qualified = self._select_value_candidates(
             group, race_key, ev_threshold, max_bets,
+            odds_correction_config=odds_correction_config,
         )
         race_harai = harai_data.get(self._race_key_str(race_key), {})
         tansho = race_harai.get("tansho", {})
@@ -554,6 +593,7 @@ class ModelEvaluator:
         race_key: dict[str, str],
         ev_threshold: float = 1.2,
         max_bets: int = 3,
+        odds_correction_config: dict[str, Any] | None = None,
     ) -> dict[str, int]:
         """期待値ベースで馬連を購入する.
 
@@ -561,6 +601,7 @@ class ModelEvaluator:
         """
         qualified = self._select_value_candidates(
             group, race_key, ev_threshold, max_bets,
+            odds_correction_config=odds_correction_config,
         )
         race_harai = harai_data.get(self._race_key_str(race_key), {})
         umaren_harai = race_harai.get("umaren", {})
@@ -626,6 +667,103 @@ class ModelEvaluator:
             except (ValueError, TypeError):
                 continue
         return result
+
+    # ------------------------------------------------------------------
+    # オッズ歪み補正
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _derive_ninki_rank(odds_dict: dict[str, float]) -> dict[str, int]:
+        """オッズ辞書からレース内人気順（1始まり）を導出する.
+
+        オッズが低い順にランク1, 2, ... を割り当てる。
+
+        Args:
+            odds_dict: umaban → 単勝オッズ の辞書
+
+        Returns:
+            umaban → 人気順 の辞書
+        """
+        sorted_items = sorted(odds_dict.items(), key=lambda x: x[1])
+        return {
+            umaban: rank + 1
+            for rank, (umaban, _) in enumerate(sorted_items)
+        }
+
+    def _apply_odds_correction(
+        self,
+        odds: float,
+        row: pd.Series,
+        ninki_rank: int,
+        config: dict[str, Any],
+    ) -> float:
+        """補正ルールを適用してオッズを調整する.
+
+        各ルールの条件が合致した場合、factor を乗算する。
+        factor < 1.0 は過大評価（割引）、> 1.0 は過小評価（上乗せ）。
+
+        Args:
+            odds: 元の単勝オッズ
+            row: 当該馬の特徴量データ行
+            ninki_rank: レース内人気順（1 = 1番人気）
+            config: 補正設定辞書
+
+        Returns:
+            補正後のオッズ
+        """
+        if not config.get("enabled", False):
+            return odds
+
+        factor = 1.0
+
+        # 人気順別テーブル補正（全ルールに先行して適用）
+        ninki_table = config.get("ninki_table", {})
+        if ninki_table and ninki_rank in ninki_table:
+            factor *= ninki_table[ninki_rank]
+
+        rules = config.get("rules", {})
+
+        # ルール1: 人気騎手 × 人気馬 → 割引
+        r = rules.get("jockey_popular_discount", {})
+        if r:
+            jockey_wr = float(row.get("jockey_win_rate_year", 0) or 0)
+            if (
+                jockey_wr >= r.get("jockey_win_rate_threshold", 0.15)
+                and ninki_rank <= r.get("ninki_threshold", 3)
+            ):
+                factor *= r["factor"]
+
+        # ルール2: 前走好走 × 人気馬 → 割引
+        r = rules.get("form_popular_discount", {})
+        if r:
+            last_jyuni = float(row.get("horse_last_jyuni", 99) or 99)
+            if (
+                last_jyuni <= r.get("last_jyuni_threshold", 3)
+                and ninki_rank <= r.get("ninki_threshold", 3)
+            ):
+                factor *= r["factor"]
+
+        # ルール3: 奇数ゲート → 割引
+        r = rules.get("odd_gate_discount", {})
+        if r:
+            try:
+                umaban_int = int(row.get("post_umaban", 0) or 0)
+            except (ValueError, TypeError):
+                umaban_int = 0
+            if umaban_int > 0 and umaban_int % 2 == 1:
+                factor *= r["factor"]
+
+        # ルール4: 偶数ゲート → 上乗せ
+        r = rules.get("even_gate_boost", {})
+        if r:
+            try:
+                umaban_int = int(row.get("post_umaban", 0) or 0)
+            except (ValueError, TypeError):
+                umaban_int = 0
+            if umaban_int > 0 and umaban_int % 2 == 0:
+                factor *= r["factor"]
+
+        return odds * factor
 
     # ------------------------------------------------------------------
     # 払戻データ

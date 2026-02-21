@@ -1,5 +1,7 @@
 """DB接続設定・定数定義."""
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
 
@@ -127,3 +129,29 @@ MISSING_CATEGORY: str = "unknown"
 # ---------------------------------------------------------------------------
 MODEL_DIR: Path = PROJECT_ROOT / "models"
 DATA_DIR: Path = PROJECT_ROOT / "data"
+ODDS_CORRECTION_STATS_PATH: Path = DATA_DIR / "odds_correction_stats.json"
+
+# ---------------------------------------------------------------------------
+# オッズ歪み補正デフォルト設定
+# ---------------------------------------------------------------------------
+DEFAULT_ODDS_CORRECTION_CONFIG: dict = {
+    "enabled": False,
+    "rules": {
+        "jockey_popular_discount": {
+            "jockey_win_rate_threshold": 0.15,
+            "ninki_threshold": 3,
+            "factor": 0.90,
+        },
+        "form_popular_discount": {
+            "last_jyuni_threshold": 3,
+            "ninki_threshold": 3,
+            "factor": 0.92,
+        },
+        "odd_gate_discount": {
+            "factor": 0.97,
+        },
+        "even_gate_boost": {
+            "factor": 1.03,
+        },
+    },
+}

@@ -56,6 +56,7 @@ everydb2/
 │   │   ├── trainer.py                # LightGBMの学習（二値分類+LambdaRank対応）
 │   │   ├── predictor.py              # 予測実行（メタデータからranking自動検出）
 │   │   └── evaluator.py             # モデル評価・回収率シミュレーション（NDCG対応）
+│   ├── odds_correction_stats.py      # オッズ歪み補正統計（DB算出 → JSON保存/ロード）
 │   └── utils/
 │       ├── __init__.py
 │       ├── code_master.py            # コード表変換ユーティリティ
@@ -68,10 +69,12 @@ everydb2/
 │       ├── mining_2024.parquet       #   マイニング特徴量（年度別）
 │       ├── bms_detail_2024.parquet   #   BMS条件別特徴量（年度別）
 │       └── ...
+├── data/odds_correction_stats.json   # オッズ歪み補正統計（--build-odds-stats で生成）
 └── tests/
     ├── test_features.py              # 30テスト（pytest）
     ├── test_mining_supplement.py     # マイニング・サプリメントテスト（16テスト）
-    └── test_bms_detail_supplement.py # BMS条件別サプリメントテスト（10テスト）
+    ├── test_bms_detail_supplement.py # BMS条件別サプリメントテスト（10テスト）
+    └── test_odds_correction.py      # オッズ歪み補正テスト（34テスト）
 ```
 
 ## データベース接続
@@ -98,7 +101,10 @@ everydb2/
 |---------------|---------------|-----------|------|
 | `TimeDIFN` | `timediff` | n_uma_race | タイム差カラム。リファレンスは`TimeDIFN`だがDBでは`timediff` |
 | `DataKubun` | *(存在しない)* | n_odds_tanpuku | 明細テーブルにはDataKubunなし。ヘッダ(`n_odds_tanpukuwaku_head`)にのみ存在 |
-| `PayTansyo*` 等 | *(動的検出)* | n_harai | 単勝/複勝/馬連/馬単/三連複/三連単の払戻カラムの命名規則がバージョン依存のため、`evaluator.py`ではスキーマから動的検出（`umaban` または `kumi` キーワードで探索） |
+| `PayTansyo*` 等 | *(動的検出)* | n_harai | 単勝/複勝/馬連/馬単/三連複/三連単の払戻カラムの命名規則がバージョン依存のため、`evaluator.py`・`odds_correction_stats.py`ではスキーマから動的検出（`umaban` または `kumi` キーワードで探索） |
+| `TanNinki` | `tanninki` | n_odds_tanpuku | 単勝人気順。値に `--` 等の非数値が含まれる場合があり、CASTの前に `~ '^[0-9]+$'` のフィルタが必要 |
+| `TanOdds` | `tanodds` | n_odds_tanpuku | 単勝オッズ（10倍値）。同上、非数値データが含まれる |
+| `KakuteiJyuni` | `kakuteijyuni` | n_uma_race | 確定着順。同上、非数値データが含まれる場合がある |
 
 ### テーブル別 DataKubun の扱い
 
@@ -299,6 +305,22 @@ python run_train.py --train-only --supplement bms_detail
 
 # 複数サプリメントを同時にマージ
 python run_train.py --train-only --supplement mining bms_detail
+
+# === オッズ歪み補正 ===
+# 統計データ構築（直近3年分、デフォルト2022-2024）
+python run_train.py --build-odds-stats
+
+# 期間指定
+python run_train.py --build-odds-stats --odds-stats-start 2020 --odds-stats-end 2024
+
+# 統計ベースの補正で評価（JSONから自動ロード）
+python run_train.py --eval-only --odds-correction
+
+# サプリメント + オッズ補正の組み合わせ
+python run_train.py --eval-only --supplement mining bms_detail --odds-correction
+
+# 本番予測でオッズ補正付きEV情報を表示
+python run_predict.py --year 2025 --monthday 0622 --all-day --odds-correction
 ```
 
 ## 特徴量の年度別保存と並列構築
@@ -459,3 +481,32 @@ father側の6条件別特徴量に対し、BMS側は2つのみという非対称
 
 **n_harai からの払戻データ取得:**
 `_get_harai_data()` は6賭式（tansyo/fukusyo/umaren/umatan/sanren/sanrentan）の払戻カラムをスキーマから動的検出する。検出時は `sanrentan` を `sanren` より先に検出することで部分一致の誤マッチを防いでいる。
+
+**オッズ歪み補正（`--odds-correction`）:**
+value_bet戦略のEV計算前にオッズを補正ルールで調整する。`adjusted_odds = raw_odds × Π(correction_factors)` で補正後オッズを算出し、`EV = pred_prob × adjusted_odds` で購入判断する。
+
+**統計データ駆動の factor 算出:**
+`python run_train.py --build-odds-stats` でDBから過去レースの回収率統計を算出し、`data/odds_correction_stats.json` に保存する。`--odds-correction` 使用時にJSONから自動ロードされる。
+
+- **baseline ROI:** 全馬に100円ずつ単勝を買った場合の回収率（テイク率の基準線）
+- **factor 算出:** `factor = category_roi / baseline_roi`（factor < 1.0 → 過大評価、> 1.0 → 過小評価）
+- **最小サンプル閾値:** 1000件未満は factor = 1.0（補正なし）
+
+補正は2段階で適用される（乗算）:
+
+1. **人気順別テーブル（ninki_table）:** 人気1位〜18位それぞれの単勝回収率から個別 factor を算出。人気馬の割引も人気薄の上乗せもデータ駆動で自動算出される
+2. **個別ルール:** 以下の4ルールで追加補正
+
+| ルール名 | 条件 | 説明 |
+|---------|------|------|
+| `jockey_popular_discount` | 騎手勝率≧15% かつ 人気≦3位 | 人気騎手×人気馬は過大評価 |
+| `form_popular_discount` | 前走3着以内 かつ 人気≦3位 | 前走好走の人気馬は過大評価 |
+| `odd_gate_discount` | 馬番が奇数 | 奇数ゲートは回収率が低い |
+| `even_gate_boost` | 馬番が偶数 | 偶数ゲートは過小評価されがち |
+
+人気順はオッズ辞書からレース内で低い順に導出する（`_derive_ninki_rank()`）。統計JSONがない場合は `config.py` の `DEFAULT_ODDS_CORRECTION_CONFIG`（ハードコード値）にフォールバックする。
+
+**関連ファイル:**
+- `src/odds_correction_stats.py` — DB統計算出・JSON保存/ロード
+- `src/model/evaluator.py` — `_apply_odds_correction()` でninki_table + ルール適用
+- `data/odds_correction_stats.json` — 統計データ（`--build-odds-stats`で生成）
