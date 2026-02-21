@@ -1320,3 +1320,259 @@ class TestSireTableRoundtrip:
             assert config["sire_distance_table"] == {}
         finally:
             path.unlink(missing_ok=True)
+
+
+# =====================================================================
+# v3: 調教師×人気帯別テーブル補正テスト
+# =====================================================================
+
+
+class TestTrainerNinkiTableCorrection:
+    """trainer_ninki_table による調教師×人気帯別補正のテスト."""
+
+    def setup_method(self) -> None:
+        self.evaluator = ModelEvaluator()
+
+    def _make_row(self, **kwargs) -> pd.Series:
+        defaults = {
+            "jockey_win_rate_year": 0.0,
+            "horse_last_jyuni": 99,
+            "post_umaban": 0,
+            "trainer_code": "01078",
+        }
+        defaults.update(kwargs)
+        return pd.Series(defaults)
+
+    def test_trainer_ninki_factor_applied(self) -> None:
+        """調教師×人気帯のfactorが正しく乗算されること."""
+        config: dict = {
+            "enabled": True,
+            "trainer_ninki_table": {"01078_D": 1.25},
+            "rules": {},
+        }
+        row = self._make_row(trainer_code="01078")
+        # ninki_rank=12 → band D
+        result = self.evaluator._apply_odds_correction(10.0, row, 12, config)
+        assert abs(result - 10.0 * 1.25) < 0.01
+
+    def test_trainer_ninki_band_A(self) -> None:
+        """人気1-3がバンドAに分類されること."""
+        config: dict = {
+            "enabled": True,
+            "trainer_ninki_table": {"01078_A": 0.90},
+            "rules": {},
+        }
+        row = self._make_row(trainer_code="01078")
+        result = self.evaluator._apply_odds_correction(10.0, row, 2, config)
+        assert abs(result - 10.0 * 0.90) < 0.01
+
+    def test_trainer_ninki_band_B(self) -> None:
+        """人気4-6がバンドBに分類されること."""
+        config: dict = {
+            "enabled": True,
+            "trainer_ninki_table": {"01078_B": 1.05},
+            "rules": {},
+        }
+        row = self._make_row(trainer_code="01078")
+        result = self.evaluator._apply_odds_correction(10.0, row, 5, config)
+        assert abs(result - 10.0 * 1.05) < 0.01
+
+    def test_trainer_ninki_band_C(self) -> None:
+        """人気7-9がバンドCに分類されること."""
+        config: dict = {
+            "enabled": True,
+            "trainer_ninki_table": {"01078_C": 1.15},
+            "rules": {},
+        }
+        row = self._make_row(trainer_code="01078")
+        result = self.evaluator._apply_odds_correction(10.0, row, 8, config)
+        assert abs(result - 10.0 * 1.15) < 0.01
+
+    def test_trainer_ninki_band_D(self) -> None:
+        """人気10以上がバンドDに分類されること."""
+        config: dict = {
+            "enabled": True,
+            "trainer_ninki_table": {"01078_D": 1.30},
+            "rules": {},
+        }
+        row = self._make_row(trainer_code="01078")
+        result = self.evaluator._apply_odds_correction(10.0, row, 15, config)
+        assert abs(result - 10.0 * 1.30) < 0.01
+
+    def test_trainer_ninki_missing_key_no_effect(self) -> None:
+        """テーブルにキーがない場合 factor=1.0 であること."""
+        config: dict = {
+            "enabled": True,
+            "trainer_ninki_table": {"01078_D": 1.25},
+            "rules": {},
+        }
+        row = self._make_row(trainer_code="99999")  # 別の調教師
+        result = self.evaluator._apply_odds_correction(10.0, row, 12, config)
+        assert result == 10.0
+
+    def test_trainer_ninki_empty_table_no_effect(self) -> None:
+        """trainer_ninki_table が空辞書の場合、補正なしであること."""
+        config: dict = {
+            "enabled": True,
+            "trainer_ninki_table": {},
+            "rules": {},
+        }
+        row = self._make_row(trainer_code="01078")
+        result = self.evaluator._apply_odds_correction(10.0, row, 12, config)
+        assert result == 10.0
+
+    def test_trainer_ninki_no_table_key_in_config(self) -> None:
+        """config に trainer_ninki_table キーがなくても動作する."""
+        config: dict = {
+            "enabled": True,
+            "rules": {},
+        }
+        row = self._make_row(trainer_code="01078")
+        result = self.evaluator._apply_odds_correction(10.0, row, 12, config)
+        assert result == 10.0
+
+    def test_trainer_ninki_empty_trainer_code(self) -> None:
+        """trainer_code が空の場合、補正なしであること."""
+        config: dict = {
+            "enabled": True,
+            "trainer_ninki_table": {"01078_D": 1.25},
+            "rules": {},
+        }
+        row = self._make_row(trainer_code="")
+        result = self.evaluator._apply_odds_correction(10.0, row, 12, config)
+        assert result == 10.0
+
+    def test_trainer_ninki_combined_with_ninki_table(self) -> None:
+        """ninki_table と trainer_ninki_table が乗算される."""
+        config: dict = {
+            "enabled": True,
+            "ninki_table": {10: 1.20},
+            "trainer_ninki_table": {"01078_D": 1.25},
+            "rules": {},
+        }
+        row = self._make_row(trainer_code="01078")
+        result = self.evaluator._apply_odds_correction(10.0, row, 10, config)
+        expected = 10.0 * 1.20 * 1.25
+        assert abs(result - expected) < 0.01
+
+    def test_trainer_ninki_combined_with_sire(self) -> None:
+        """sire_surface_table と trainer_ninki_table が乗算される."""
+        config: dict = {
+            "enabled": True,
+            "sire_surface_table": {"サンデーサイレンス_siba": 1.05},
+            "trainer_ninki_table": {"01078_C": 1.15},
+            "rules": {},
+        }
+        row = self._make_row(
+            trainer_code="01078",
+            blood_father_keito="サンデーサイレンス",
+            race_track_cd="11",
+            race_jyo_cd="05",
+            race_distance=1600,
+        )
+        result = self.evaluator._apply_odds_correction(10.0, row, 8, config)
+        expected = 10.0 * 1.15 * 1.05
+        assert abs(result - expected) < 0.01
+
+    def test_trainer_ninki_discount_popular(self) -> None:
+        """戦略的でない厩舎の人気馬は割引されること."""
+        config: dict = {
+            "enabled": True,
+            "trainer_ninki_table": {"00999_A": 0.85},
+            "rules": {},
+        }
+        row = self._make_row(trainer_code="00999")
+        result = self.evaluator._apply_odds_correction(10.0, row, 1, config)
+        assert abs(result - 10.0 * 0.85) < 0.01
+
+
+class TestNinkiBandClassification:
+    """_ninki_band 分類のテスト."""
+
+    def test_band_A(self) -> None:
+        """人気1-3 はバンド A."""
+        assert ModelEvaluator._ninki_band(1) == "A"
+        assert ModelEvaluator._ninki_band(2) == "A"
+        assert ModelEvaluator._ninki_band(3) == "A"
+
+    def test_band_B(self) -> None:
+        """人気4-6 はバンド B."""
+        assert ModelEvaluator._ninki_band(4) == "B"
+        assert ModelEvaluator._ninki_band(5) == "B"
+        assert ModelEvaluator._ninki_band(6) == "B"
+
+    def test_band_C(self) -> None:
+        """人気7-9 はバンド C."""
+        assert ModelEvaluator._ninki_band(7) == "C"
+        assert ModelEvaluator._ninki_band(8) == "C"
+        assert ModelEvaluator._ninki_band(9) == "C"
+
+    def test_band_D(self) -> None:
+        """人気10+ はバンド D."""
+        assert ModelEvaluator._ninki_band(10) == "D"
+        assert ModelEvaluator._ninki_band(18) == "D"
+        assert ModelEvaluator._ninki_band(99) == "D"
+
+
+class TestTrainerNinkiTableRoundtrip:
+    """trainer_ninki_table の save/load テスト."""
+
+    def _make_sample_stats(self) -> dict:
+        return {
+            "generated_at": "2026-02-21T12:00:00",
+            "period": {"start": "2022", "end": "2024"},
+            "baseline_roi": 0.775,
+            "baseline_samples": 100000,
+            "min_samples": 1000,
+            "ninki_table": {
+                "1": {"factor": 0.85, "samples": 5000, "roi": 0.659},
+            },
+            "style_table": {},
+            "post_course_table": {},
+            "sire_surface_table": {},
+            "sire_distance_table": {},
+            "trainer_ninki_table": {
+                "01078_C": {
+                    "factor": 1.25, "samples": 500, "roi": 0.969,
+                },
+                "01078_D": {
+                    "factor": 1.40, "samples": 350, "roi": 1.085,
+                },
+                "01180_A": {
+                    "factor": 0.88, "samples": 200, "roi": 0.682,
+                },
+            },
+            "rules": {},
+        }
+
+    def test_trainer_ninki_table_roundtrip(self) -> None:
+        """trainer_ninki_table が正しく save/load される."""
+        stats = self._make_sample_stats()
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = Path(f.name)
+
+        try:
+            save_odds_correction_stats(stats, path)
+            config = load_odds_correction_stats(path)
+
+            assert "trainer_ninki_table" in config
+            assert abs(config["trainer_ninki_table"]["01078_C"] - 1.25) < 0.001
+            assert abs(config["trainer_ninki_table"]["01078_D"] - 1.40) < 0.001
+            assert abs(config["trainer_ninki_table"]["01180_A"] - 0.88) < 0.001
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_load_without_trainer_ninki_table(self) -> None:
+        """trainer_ninki_table がないJSONでもエラーなくロードできる（後方互換）."""
+        stats = self._make_sample_stats()
+        del stats["trainer_ninki_table"]
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            path = Path(f.name)
+
+        try:
+            save_odds_correction_stats(stats, path)
+            config = load_odds_correction_stats(path)
+
+            assert config["trainer_ninki_table"] == {}
+        finally:
+            path.unlink(missing_ok=True)

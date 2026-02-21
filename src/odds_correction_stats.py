@@ -132,6 +132,14 @@ def build_odds_correction_stats(
         year_start, year_end, baseline_roi, min_samples=500,
     )
 
+    # v3: 調教師×人気帯別テーブル（戦略的厩舎）
+    trainer_ninki_table = _calc_trainer_ninki_stats(
+        year_start, year_end,
+        tansho_umaban_col, tansho_pay_col,
+        baseline_roi, min_samples=200,
+    )
+    logger.info("trainer_ninki_table: %d区分", len(trainer_ninki_table))
+
     stats: dict[str, Any] = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "period": {"start": year_start, "end": year_end},
@@ -143,6 +151,7 @@ def build_odds_correction_stats(
         "post_course_table": post_course_table,
         "sire_surface_table": sire_surface_table,
         "sire_distance_table": sire_distance_table,
+        "trainer_ninki_table": trainer_ninki_table,
         "rules": {
             "jockey_popular_discount": jockey_stats,
             "form_popular_discount": form_stats,
@@ -240,6 +249,12 @@ def load_odds_correction_stats(
     for k, v in sire_distance_table_raw.items():
         sire_distance_table[k] = v["factor"] if isinstance(v, dict) else float(v)
 
+    # trainer_ninki_table: キーは "{trainer_code}_{band}"
+    trainer_ninki_table_raw = stats.get("trainer_ninki_table", {})
+    trainer_ninki_table: dict[str, float] = {}
+    for k, v in trainer_ninki_table_raw.items():
+        trainer_ninki_table[k] = v["factor"] if isinstance(v, dict) else float(v)
+
     # rules: factor 以外のキーも含めて渡す
     rules = stats.get("rules", {})
 
@@ -250,6 +265,7 @@ def load_odds_correction_stats(
         "post_course_table": post_course_table,
         "sire_surface_table": sire_surface_table,
         "sire_distance_table": sire_distance_table,
+        "trainer_ninki_table": trainer_ninki_table,
         "rules": rules,
     }
 
@@ -1251,4 +1267,122 @@ def _calc_sire_distance_stats(
         }
 
     logger.info("sire_distance_table: %d区分", len(result))
+    return result
+
+
+# =====================================================================
+# v3 統計: 調教師×人気帯（戦略的厩舎）
+# =====================================================================
+
+
+def _ninki_band(ninki: int) -> str:
+    """人気順を帯域に分類する.
+
+    A: 上位人気(1-3), B: 中位人気(4-6), C: 穴人気(7-9), D: 大穴(10+)
+    """
+    if ninki <= 3:
+        return "A"
+    elif ninki <= 6:
+        return "B"
+    elif ninki <= 9:
+        return "C"
+    else:
+        return "D"
+
+
+def _calc_trainer_ninki_stats(
+    year_start: str,
+    year_end: str,
+    tansho_umaban_col: str,
+    tansho_pay_col: str,
+    baseline_roi: float,
+    min_samples: int = 200,
+) -> dict[str, dict[str, Any]]:
+    """調教師 × 人気帯別の単勝回収率テーブルを算出する.
+
+    戦略的厩舎の分析に基づき、調教師ごとに人気帯(A-D)別のROIから
+    factor を算出する。穴馬(C,D帯)での回収率が高い調教師を検出し、
+    オッズ補正に活用する。
+
+    Args:
+        year_start: 集計開始年
+        year_end: 集計終了年
+        tansho_umaban_col: n_harai の単勝馬番カラム名
+        tansho_pay_col: n_harai の単勝払戻カラム名
+        baseline_roi: 全体の基準回収率
+        min_samples: 最小サンプル数（調教師×人気帯ごと）
+
+    Returns:
+        {"{chokyosicode}_{band}": {"factor": ..., "samples": ..., "roi": ...}, ...}
+        band は "A"(1-3人気), "B"(4-6), "C"(7-9), "D"(10+)
+    """
+    sql = f"""
+    SELECT
+        TRIM(ur.chokyosicode) AS trainer_code,
+        CAST(o.tanninki AS int) AS ninki,
+        COUNT(*) AS cnt,
+        SUM(CASE WHEN ur.kakuteijyuni ~ '^[0-9]+$'
+                      AND CAST(ur.kakuteijyuni AS int) = 1
+            THEN COALESCE(CAST(o.tanodds AS numeric) / 10.0, 0)
+            ELSE 0 END) * 100 AS total_pay
+    FROM n_uma_race ur
+    JOIN n_odds_tanpuku o
+        ON ur.year = o.year AND ur.monthday = o.monthday
+        AND ur.jyocd = o.jyocd AND ur.kaiji = o.kaiji
+        AND ur.nichiji = o.nichiji AND ur.racenum = o.racenum
+        AND ur.umaban = o.umaban
+    WHERE ur.datakubun = '7' AND ur.ijyocd = '0'
+      AND ur.year BETWEEN %(start)s AND %(end)s
+      AND {_jyo_filter("ur.")}
+      AND o.tanninki ~ '^[0-9]+$'
+      AND CAST(o.tanninki AS int) BETWEEN 1 AND 18
+      AND o.tanodds ~ '^[0-9]+$'
+      AND CAST(o.tanodds AS int) > 0
+    GROUP BY TRIM(ur.chokyosicode), CAST(o.tanninki AS int)
+    """
+    df = query_df(sql, {"start": year_start, "end": year_end})
+
+    if df.empty:
+        return {}
+
+    # 調教師×人気帯で集約
+    df["band"] = df["ninki"].apply(_ninki_band)
+    agg = df.groupby(["trainer_code", "band"]).agg(
+        cnt=("cnt", "sum"),
+        total_pay=("total_pay", "sum"),
+    ).reset_index()
+
+    result: dict[str, dict[str, Any]] = {}
+    for _, row in agg.iterrows():
+        trainer_code = str(row["trainer_code"]).strip()
+        band = str(row["band"])
+        cnt = int(row["cnt"])
+        total_pay = float(row["total_pay"])
+        total_bet = cnt * 100
+        roi = total_pay / total_bet if total_bet > 0 else 0.0
+
+        if cnt >= min_samples and baseline_roi > 0:
+            factor = roi / baseline_roi
+        else:
+            factor = 1.0
+
+        # factor が 1.0（補正なし）のエントリは省略してJSONサイズを抑制
+        if abs(factor - 1.0) < 0.001:
+            continue
+
+        key = f"{trainer_code}_{band}"
+        result[key] = {
+            "factor": round(factor, 6),
+            "samples": cnt,
+            "roi": round(roi, 6),
+        }
+
+    # 有意なエントリ数をログ出力
+    boost_count = sum(1 for v in result.values() if v["factor"] > 1.0)
+    discount_count = sum(1 for v in result.values() if v["factor"] < 1.0)
+    logger.info(
+        "  trainer_ninki_table: boost=%d, discount=%d, total=%d",
+        boost_count, discount_count, len(result),
+    )
+
     return result

@@ -74,7 +74,7 @@ everydb2/
     ├── test_features.py              # 30テスト（pytest）
     ├── test_mining_supplement.py     # マイニング・サプリメントテスト（16テスト）
     ├── test_bms_detail_supplement.py # BMS条件別サプリメントテスト（10テスト）
-    └── test_odds_correction.py      # オッズ歪み補正テスト（64テスト）
+    └── test_odds_correction.py      # オッズ歪み補正テスト（102テスト）
 ```
 
 ## データベース接続
@@ -501,6 +501,9 @@ value_bet戦略のEV計算前にオッズを補正ルールで調整する。`ad
 4. **馬番×コース別テーブル（post_course_table）:** 馬番グループ×コースカテゴリ別のROIベースfactor（v2）
 5. **クラス変更ルール:** 昇級/降級時の補正（v2）
 6. **牝馬限定⇔混合遷移ルール:** 牝馬限定戦↔混合戦の移行時の補正（v2）
+7. **調教師×人気帯別テーブル（trainer_ninki_table）:** 調教師コード×人気帯(A-D)別のROIベースfactor（v3）。戦略的厩舎（人気薄で期待以上の成績を出す厩舎）の検出に基づく
+8. **父系統×サーフェス別テーブル（sire_surface_table）:** 父系統×サーフェス(洋芝/芝/ダート)別のROIベースfactor（v3）
+9. **父系統×距離帯別テーブル（sire_distance_table）:** 父系統×距離帯(sprint/mile/middle/long)別のROIベースfactor（v3）
 
 ### 個別ルール一覧
 
@@ -529,6 +532,25 @@ value_bet戦略のEV計算前にオッズを補正ルールで調整する。`ad
 - 新潟直線コース（jyocd=04, trackcd=10）は外枠有利の特殊ケースとして個別に扱う
 - ヘルパーメソッド: `_post_group(umaban)`, `_course_category(jyo_cd, track_cd)`
 
+### v3 テーブル補正
+
+**調教師×人気帯別テーブル（trainer_ninki_table）:**
+- 調教師コード（chokyosicode）× 人気帯（A=1-3人気, B=4-6, C=7-9, D=10+）ごとに単勝回収率からfactorを算出
+- 戦略的厩舎（人気薄で期待以上の成績を安定的に出す厩舎）の回収率歪みを補正
+- 穴馬(C,D帯)で factor > 1.0 の厩舎はオッズが過小評価されている
+- `{trainer_code}_{band}` のキーで検索、ない場合は factor=1.0
+- 最小サンプル数200件、factor ≈ 1.0 のエントリは省略してJSONサイズを抑制
+- 特徴量 `trainer_code` と人気順（`_derive_ninki_rank()` で導出）を参照して適用
+- ヘルパーメソッド: `_ninki_band(ninki)`
+
+**父系統×サーフェス別テーブル（sire_surface_table）:**
+- 父系統（keitoname）× サーフェス（yousiba/siba/dirt）ごとのROIベースfactor
+- 特徴量 `blood_father_keito`, `race_track_cd`, `race_jyo_cd` を参照
+
+**父系統×距離帯別テーブル（sire_distance_table）:**
+- 父系統（keitoname）× 距離帯（sprint/mile/middle/long）ごとのROIベースfactor
+- 特徴量 `blood_father_keito`, `race_distance` を参照
+
 ### フォールバックチェーン
 
 ```
@@ -555,9 +577,9 @@ post_group 単独フォールバック
 人気順はオッズ辞書からレース内で低い順に導出する（`_derive_ninki_rank()`）。統計JSONがない場合は `config.py` の `DEFAULT_ODDS_CORRECTION_CONFIG`（ハードコード値）にフォールバックする。
 
 **関連ファイル:**
-- `src/odds_correction_stats.py` — DB統計算出・JSON保存/ロード（v2: `_calc_running_style_stats`, `_calc_post_position_course_stats`, `_calc_class_change_stats`, `_calc_filly_transition_stats`）
-- `src/model/evaluator.py` — `_apply_odds_correction()` でninki_table + 全ルール適用（v2: `_post_group()`, `_course_category()`）
+- `src/odds_correction_stats.py` — DB統計算出・JSON保存/ロード（v2: `_calc_running_style_stats`, `_calc_post_position_course_stats`, `_calc_class_change_stats`, `_calc_filly_transition_stats`、v3: `_calc_sire_surface_stats`, `_calc_sire_distance_stats`, `_calc_trainer_ninki_stats`）
+- `src/model/evaluator.py` — `_apply_odds_correction()` でninki_table + 全ルール適用（v2: `_post_group()`, `_course_category()`、v3: `_ninki_band()`）
 - `src/utils/code_master.py` — `class_level()` クラス序列ヘルパー
 - `src/features/pipeline.py` — `cross_class_change`（修正）, `cross_prev_filly_only`, `cross_current_filly_only`（新規）
 - `src/config.py` — `DEFAULT_ODDS_CORRECTION_CONFIG`（v2ルールのデフォルト値追加）
-- `data/odds_correction_stats.json` — 統計データ（`--build-odds-stats`で生成、v2テーブル含む）
+- `data/odds_correction_stats.json` — 統計データ（`--build-odds-stats`で生成、v2テーブル + v3テーブル含む）

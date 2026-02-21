@@ -691,6 +691,21 @@ class ModelEvaluator:
         }
 
     @staticmethod
+    def _ninki_band(ninki: int) -> str:
+        """人気順を帯域に分類する.
+
+        A: 上位人気(1-3), B: 中位人気(4-6), C: 穴人気(7-9), D: 大穴(10+)
+        """
+        if ninki <= 3:
+            return "A"
+        elif ninki <= 6:
+            return "B"
+        elif ninki <= 9:
+            return "C"
+        else:
+            return "D"
+
+    @staticmethod
     def _post_group(umaban: int) -> str:
         """馬番をグループに分類する."""
         if 1 <= umaban <= 3:
@@ -856,6 +871,16 @@ class ModelEvaluator:
                     cur_fo = 0
                 if prev_fo == 0 and cur_fo == 1:
                     factor *= r["factor"]
+
+        # Step 10: 調教師×人気帯別テーブル（戦略的厩舎）
+        trainer_ninki_table = config.get("trainer_ninki_table", {})
+        if trainer_ninki_table:
+            tc = str(row.get("trainer_code", "") or "").strip()
+            if tc:
+                band = self._ninki_band(ninki_rank)
+                trainer_key = f"{tc}_{band}"
+                if trainer_key in trainer_ninki_table:
+                    factor *= trainer_ninki_table[trainer_key]
 
         # Step 8: 父系統×サーフェス別テーブル
         sire_surface_table = config.get("sire_surface_table", {})
