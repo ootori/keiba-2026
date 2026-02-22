@@ -17,6 +17,11 @@ EveryDB2（PostgreSQL）に蓄積されたJRA-VAN DataLabデータを特徴量�
 - **DB接続先:** `localhost:5432`, DB名=`everydb`, ユーザ=`webmaster`, パスワード=`devpassword`
 - **データ処理:** pandas, numpy
 - **評価:** scikit-learn
+- **仮想環境:** venv（`venv/` ディレクトリ、Python 3.9.8）
+  - 作成: `python3 -m venv venv`
+  - 有効化: `source venv/bin/activate`
+  - パッケージインストール: `pip install -r requirements.txt`
+  - スクリプト実行: `venv/bin/python run_train.py ...`
 
 ## ディレクトリ構成
 
