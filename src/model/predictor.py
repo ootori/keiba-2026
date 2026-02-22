@@ -131,7 +131,7 @@ class Predictor:
         year: str,
         monthday: str,
         jyocd: str | None = None,
-    ) -> dict[str, pd.DataFrame]:
+    ) -> list[tuple[dict[str, str], pd.DataFrame]]:
         """1日分の全レースを予測する.
 
         Args:
@@ -140,10 +140,10 @@ class Predictor:
             jyocd: 競馬場コード（Noneの場合は全場）
 
         Returns:
-            レースキー文字列 → 予測結果 DataFrame の辞書
+            (レースキー辞書, 予測結果DataFrame) のリスト
         """
         races = self._get_day_races(year, monthday, jyocd)
-        results: dict[str, pd.DataFrame] = {}
+        results: list[tuple[dict[str, str], pd.DataFrame]] = []
 
         for _, race in races.iterrows():
             race_key = {
@@ -157,8 +157,7 @@ class Predictor:
 
             try:
                 pred = self.predict_race(race_key)
-                key_str = f"{race_key['jyocd']}_{race_key['racenum']}R"
-                results[key_str] = pred
+                results.append((race_key, pred))
             except Exception as e:
                 logger.warning("予測エラー: %s - %s", race_key, e)
 
@@ -168,12 +167,16 @@ class Predictor:
         self,
         race_key: dict[str, str],
         prediction: pd.DataFrame,
+        odds_correction_config: dict | None = None,
     ) -> str:
         """予測結果をフォーマットして出力する.
+
+        DBからオッズを取得できた場合はオッズ・補正後オッズ・EV・人気も表示する。
 
         Args:
             race_key: レースキー辞書
             prediction: predict_race() の結果
+            odds_correction_config: オッズ補正設定（Noneの場合は補正なし）
 
         Returns:
             フォーマットされた予測結果文字列
@@ -201,28 +204,139 @@ class Predictor:
                 lines[0] += f" {race_name.strip()}"
             lines.append(f"{track_name}{distance}m {baba} {tosu}頭 {grade}")
 
-        lines.append("")
+        # モデル出力をレース内合計で割って正規化（合計100%にする）
+        # LambdaRank の場合は softmax、二値分類の場合は ratio 正規化
+        import numpy as np
+        raw_probs = prediction["pred_prob"].copy()
         if self.ranking:
-            lines.append(f"{'予測':>4s}  {'馬番':>4s}  {'馬名':<16s}  {'スコア':>6s}")
+            exp_scores = np.exp(raw_probs - raw_probs.max())
+            total = exp_scores.sum()
+            if total > 0:
+                prediction = prediction.copy()
+                prediction["pred_prob"] = exp_scores / total
         else:
-            lines.append(f"{'予測':>4s}  {'馬番':>4s}  {'馬名':<16s}  {'確率':>6s}")
-        lines.append("-" * 40)
+            total = raw_probs.sum()
+            if total > 0:
+                prediction = prediction.copy()
+                prediction["pred_prob"] = raw_probs / total
+
+        # オッズをDBから取得
+        odds_dict = self._get_odds_from_db(race_key)
+        has_odds = bool(odds_dict)
+
+        # 人気順を導出
+        ninki_ranks: dict[str, int] = {}
+        if has_odds:
+            sorted_odds = sorted(odds_dict.items(), key=lambda x: x[1])
+            for i, (uma, _) in enumerate(sorted_odds, 1):
+                ninki_ranks[uma] = i
+
+        # オッズ補正用 evaluator（補正設定がある場合のみ）
+        evaluator = None
+        if has_odds and odds_correction_config:
+            try:
+                from src.model.evaluator import ModelEvaluator
+                evaluator = ModelEvaluator()
+            except Exception:
+                pass
+
+        lines.append("")
+        if has_odds:
+            if evaluator:
+                lines.append(
+                    f"{'予測':>4s}  {'馬番':>4s}  {'馬名':<16s}  "
+                    f"{'確率':>6s}  {'人気':>4s}  {'ｵｯｽﾞ':>6s}  "
+                    f"{'補正後':>6s}  {'EV':>5s}"
+                )
+                lines.append("-" * 72)
+            else:
+                lines.append(
+                    f"{'予測':>4s}  {'馬番':>4s}  {'馬名':<16s}  "
+                    f"{'確率':>6s}  {'人気':>4s}  {'ｵｯｽﾞ':>6s}  {'EV':>5s}"
+                )
+                lines.append("-" * 64)
+        else:
+            if self.ranking:
+                lines.append(
+                    f"{'予測':>4s}  {'馬番':>4s}  {'馬名':<16s}  {'スコア':>6s}"
+                )
+            else:
+                lines.append(
+                    f"{'予測':>4s}  {'馬番':>4s}  {'馬名':<16s}  {'確率':>6s}"
+                )
+            lines.append("-" * 40)
 
         for _, row in prediction.iterrows():
             rank = int(row["pred_rank"])
             umaban = str(row.get("umaban", "")).strip()
             bamei = str(row.get("bamei", "")).strip()
+            pred_prob = row["pred_prob"]
 
-            if self.ranking:
-                score = row["pred_prob"]
-                lines.append(
-                    f"{rank:>4d}  {umaban:>4s}  {bamei:<16s}  {score:>6.2f}"
-                )
+            if has_odds:
+                umaban_key = umaban.zfill(2)
+                raw_odds = odds_dict.get(umaban_key, 0.0)
+                ninki = ninki_ranks.get(umaban_key, 0)
+
+                if evaluator and raw_odds > 0:
+                    dummy_row = pd.Series({"post_umaban": int(umaban) if umaban.isdigit() else 0})
+                    corrected_odds = evaluator._apply_odds_correction(
+                        raw_odds, dummy_row, ninki, odds_correction_config,
+                    )
+                    ev = pred_prob * corrected_odds
+                    marker = " *" if ev >= 1.1 and pred_prob >= 0.025 else ""
+                    if self.ranking:
+                        lines.append(
+                            f"{rank:>4d}  {umaban:>4s}  {bamei:<16s}  "
+                            f"{pred_prob:>6.2f}  {ninki:>4d}  {raw_odds:>6.1f}  "
+                            f"{corrected_odds:>6.1f}  {ev:>5.2f}{marker}"
+                        )
+                    else:
+                        prob_pct = pred_prob * 100
+                        lines.append(
+                            f"{rank:>4d}  {umaban:>4s}  {bamei:<16s}  "
+                            f"{prob_pct:>5.1f}%  {ninki:>4d}  {raw_odds:>6.1f}  "
+                            f"{corrected_odds:>6.1f}  {ev:>5.2f}{marker}"
+                        )
+                elif raw_odds > 0:
+                    ev = pred_prob * raw_odds
+                    marker = " *" if ev >= 1.1 and pred_prob >= 0.025 else ""
+                    if self.ranking:
+                        lines.append(
+                            f"{rank:>4d}  {umaban:>4s}  {bamei:<16s}  "
+                            f"{pred_prob:>6.2f}  {ninki:>4d}  {raw_odds:>6.1f}  "
+                            f"{ev:>5.2f}{marker}"
+                        )
+                    else:
+                        prob_pct = pred_prob * 100
+                        lines.append(
+                            f"{rank:>4d}  {umaban:>4s}  {bamei:<16s}  "
+                            f"{prob_pct:>5.1f}%  {ninki:>4d}  {raw_odds:>6.1f}  "
+                            f"{ev:>5.2f}{marker}"
+                        )
+                else:
+                    # オッズなし（出走取消等）
+                    if self.ranking:
+                        lines.append(
+                            f"{rank:>4d}  {umaban:>4s}  {bamei:<16s}  "
+                            f"{pred_prob:>6.2f}  {'--':>4s}  {'--':>6s}  {'--':>5s}"
+                        )
+                    else:
+                        prob_pct = pred_prob * 100
+                        lines.append(
+                            f"{rank:>4d}  {umaban:>4s}  {bamei:<16s}  "
+                            f"{prob_pct:>5.1f}%  {'--':>4s}  {'--':>6s}  {'--':>5s}"
+                        )
             else:
-                prob = row["pred_prob"] * 100
-                lines.append(
-                    f"{rank:>4d}  {umaban:>4s}  {bamei:<16s}  {prob:>5.1f}%"
-                )
+                # オッズ取得不可（DBアクセス不可等）
+                if self.ranking:
+                    lines.append(
+                        f"{rank:>4d}  {umaban:>4s}  {bamei:<16s}  {pred_prob:>6.2f}"
+                    )
+                else:
+                    prob_pct = pred_prob * 100
+                    lines.append(
+                        f"{rank:>4d}  {umaban:>4s}  {bamei:<16s}  {prob_pct:>5.1f}%"
+                    )
 
         # 推奨買い目
         if len(prediction) >= 3:
@@ -236,6 +350,10 @@ class Predictor:
                 f"ワイド {top1_umaban}-{top2_umaban}"
             )
 
+        if has_odds:
+            lines.append("")
+            lines.append("* = EV >= 1.1 かつ 予想勝率 >= 2.5%（value_bet候補）")
+
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -247,13 +365,14 @@ class Predictor:
         if not self.feature_columns:
             return features
 
-        # 学習時の特徴量順に合わせる
-        X = pd.DataFrame(index=features.index)
+        # 学習時の特徴量順に一括構築（フラグメンテーション回避）
+        col_data: dict[str, pd.Series] = {}
         for col in self.feature_columns:
             if col in features.columns:
-                X[col] = features[col]
+                col_data[col] = features[col]
             else:
-                X[col] = -1  # 欠損
+                col_data[col] = pd.Series(-1, index=features.index)
+        X = pd.DataFrame(col_data, index=features.index)
 
         # カテゴリ変数を category 型に変換
         for col in CATEGORICAL_FEATURES:
@@ -328,3 +447,39 @@ class Predictor:
             "tosu": str(row.get("syussotosu", "")).strip(),
             "racename": str(row.get("hondai", "")).strip(),
         }
+
+    def _get_odds_from_db(
+        self,
+        race_key: dict[str, str],
+    ) -> dict[str, float]:
+        """n_odds_tanpuku から単勝オッズを取得する.
+
+        Returns:
+            umaban(ゼロ埋め) → 単勝オッズ の辞書。取得失敗時は空辞書。
+        """
+        sql = """
+        SELECT umaban, tanodds
+        FROM n_odds_tanpuku
+        WHERE year = %(year)s AND monthday = %(monthday)s
+          AND jyocd = %(jyocd)s AND kaiji = %(kaiji)s
+          AND nichiji = %(nichiji)s AND racenum = %(racenum)s
+        """
+        try:
+            df = query_df(sql, race_key)
+        except Exception:
+            logger.debug("オッズDB取得失敗: race_key=%s", race_key)
+            return {}
+
+        result: dict[str, float] = {}
+        for _, row in df.iterrows():
+            umaban = str(row.get("umaban", "")).strip().zfill(2)
+            odds_str = str(row.get("tanodds", "")).strip()
+            if not odds_str or odds_str == "0000":
+                continue
+            try:
+                odds_val = int(odds_str) / 10.0
+                if odds_val > 0:
+                    result[umaban] = odds_val
+            except (ValueError, TypeError):
+                continue
+        return result

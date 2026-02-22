@@ -49,6 +49,7 @@ everydb2/
 │   │   ├── odds.py                   # オッズ・人気（カテゴリ15）
 │   │   ├── mining.py                # JRA-VANデータマイニング予想（カテゴリ18: サプリメント）
 │   │   ├── bms_detail.py            # BMS条件別パフォーマンス（v2提案B: サプリメント）
+│   │   ├── rating.py               # Glickoレーティング特徴量（カテゴリ20: サプリメント）
 │   │   ├── supplement.py            # 差分特徴量（サプリメント）パイプライン
 │   │   └── pipeline.py              # 特徴量パイプライン統合+クロス特徴量（カテゴリ16）
 │   ├── model/
@@ -68,12 +69,14 @@ everydb2/
 │   └── supplements/                  # サプリメント（差分特徴量）保存先
 │       ├── mining_2024.parquet       #   マイニング特徴量（年度別）
 │       ├── bms_detail_2024.parquet   #   BMS条件別特徴量（年度別）
+│       ├── rating_2024.parquet      #   Glickoレーティング特徴量（年度別）
 │       └── ...
 ├── data/odds_correction_stats.json   # オッズ歪み補正統計（--build-odds-stats で生成）
 └── tests/
     ├── test_features.py              # 30テスト（pytest）
     ├── test_mining_supplement.py     # マイニング・サプリメントテスト（16テスト）
     ├── test_bms_detail_supplement.py # BMS条件別サプリメントテスト（10テスト）
+    ├── test_rating_supplement.py    # Glickoレーティングサプリメントテスト（21テスト）
     └── test_odds_correction.py      # オッズ歪み補正テスト（102テスト）
 ```
 
@@ -134,6 +137,8 @@ everydb2/
 | n_hansyoku | 繁殖馬マスタ（血統系統） | hansyokunum |
 | n_sanku | 産駒マスタ（4代血統） | kettonum |
 | n_keito | 系統情報 | hansyokunum |
+| n_uma_race_rating | 馬別Glickoレーティング（レース後確定） | レースキー + kettonum |
+| n_kisyu_race_rating | 騎手別Glickoレーティング（当日全レース後） | kisyucode + year + monthday |
 
 ## 予測タスク定義
 
@@ -176,8 +181,9 @@ everydb2/
 17. **レース内相対特徴量(36):** 主要能力指標のレース内Zスコア・ランク（血統4指標追加）
 18. **マイニング予想(7):** DM予想タイム, DM予想順位, DM誤差幅, 対戦型スコア（サプリメント）
 19. **BMS条件別(6):** BMS距離帯別/馬場別/競馬場別/父馬齢別/ニックス芝ダ別/父クラス別（サプリメント）
+20. **Glickoレーティング(28):** 馬レーティング(8), 騎手レーティング(6), 合算(2), レース内相対馬単体(6), レース内相対合算(6)（サプリメント）
 
-合計 **約194特徴量**（v1: ~182 + マイニング: 7 + BMS条件別: 6 ※サプリメント含む。クロス特徴量8→10で+2。詳細は `docs/feature_design.md` 参照）
+合計 **約222特徴量**（v1: ~182 + マイニング: 7 + BMS条件別: 6 + レーティング: 28 ※サプリメント含む。クロス特徴量8→10で+2。詳細は `docs/feature_design.md` 参照）
 
 ### v2 深掘り提案（2026-02-20策定）
 
@@ -306,6 +312,15 @@ python run_train.py --train-only --supplement bms_detail
 # 複数サプリメントを同時にマージ
 python run_train.py --train-only --supplement mining bms_detail
 
+# Glickoレーティング特徴量をサプリメントとして構築
+python run_train.py --build-supplement rating --workers 4
+
+# レーティングをマージして学習
+python run_train.py --train-only --supplement rating
+
+# 全サプリメントを同時にマージ
+python run_train.py --train-only --supplement mining bms_detail rating
+
 # === オッズ歪み補正 ===
 # 統計データ構築（直近3年分、デフォルト2022-2024）
 python run_train.py --build-odds-stats
@@ -377,6 +392,7 @@ data/
 **サプリメント登録簿（supplement.py）:**
 - `mining`: JRA-VANデータマイニング予想特徴量（MiningFeatureExtractor）
 - `bms_detail`: BMS条件別パフォーマンス特徴量（BMSDetailFeatureExtractor）
+- `rating`: Glickoレーティング特徴量（RatingFeatureExtractor）
 - 新しいサプリメントを追加するには `_get_registry()` に登録
 
 **API:**
@@ -426,6 +442,41 @@ father側の6条件別特徴量に対し、BMS側は2つのみという非対称
 - GradeCD が A-D → `"grade"`（重賞）
 - JyokenCD5 >= 500 → `"open"`（オープン）
 - それ以外 → `"jouken"`（条件戦）
+
+### Glickoレーティング特徴量（カテゴリ20）
+
+n_uma_race_rating（馬別）と n_kisyu_race_rating（騎手別）のGlickoレーティングを特徴量化するサプリメント。
+
+| 特徴量名 | 説明 | データソース |
+|---------|------|------------|
+| `rating_horse_all` | 馬の総合Glickoレーティング（直前レース時点） | n_uma_race_rating.all_rating |
+| `rating_horse_all_rd` | 総合RD（偏差） | n_uma_race_rating.all_rd |
+| `rating_horse_surface` | 芝/ダート別レーティング（フォールバック: all） | n_uma_race_rating.shiba/dirt_rating |
+| `rating_horse_surface_rd` | サーフェス別RD | n_uma_race_rating.shiba/dirt_rd |
+| `rating_horse_best` | max(all, surface) | 計算値 |
+| `rating_horse_surface_exists` | サーフェス別レーティングの有無（1/0） | 計算値 |
+| `rating_horse_races_rated` | レーティング済みレース数（データ成熟度） | n_uma_race_rating COUNT |
+| `rating_horse_rd_ratio` | surface_rd / all_rd | 計算値 |
+| `rating_jockey_all` | 騎手の総合レーティング | n_kisyu_race_rating.all_rating |
+| `rating_jockey_all_rd` | 騎手の総合RD | n_kisyu_race_rating.all_rd |
+| `rating_jockey_surface` | 騎手の芝/ダート別レーティング | n_kisyu_race_rating.shiba/dirt_rating |
+| `rating_jockey_surface_rd` | 騎手のサーフェス別RD | n_kisyu_race_rating.shiba/dirt_rd |
+| `rating_jockey_jyo` | 騎手の当該競馬場レーティング | n_kisyu_race_rating.jyocd_XX_rating |
+| `rating_jockey_jyo_rd` | 騎手の当該競馬場RD | n_kisyu_race_rating.jyocd_XX_rd |
+| `rating_combined` | horse_surface + jockey_surface | 計算値 |
+| `rating_combined_rd` | sqrt(horse_rd^2 + jockey_rd^2) | 計算値 |
+| `rating_horse_diff_top1`〜`top5` | 自馬のsurface_rating - レース内N位 | 計算値 |
+| `rating_horse_diff_strongest2` | all_rating 1位と2位の差（全馬共通） | 計算値 |
+| `rating_combined_diff_top1`〜`top5` | 自馬のcombined - レース内N位 | 計算値 |
+| `rating_combined_diff_strongest2` | combined 1位と2位の差（全馬共通） | 計算値 |
+
+**データリーク防止:**
+- 馬レーティング: `(year || monthday) < race_date` で当該レースより前のレーティングのみ使用
+- 騎手レーティング: `(year || monthday) < race_date` で前日以前のレーティングのみ使用
+
+**欠損値戦略:**
+- 全レーティング特徴量: NaN（LightGBMネイティブ欠損）
+- 新馬・初出走はNaN。サーフェス別レーティングがない場合はall_ratingにフォールバック
 
 ## LightGBM categorical_feature の注意
 

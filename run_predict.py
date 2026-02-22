@@ -14,6 +14,9 @@
 
     # オッズ込みモデルで予測
     python run_predict.py --year 2025 --monthday 0622 --all-day --with-odds
+
+    # オッズ歪み補正付き
+    python run_predict.py --year 2025 --monthday 0622 --all-day --odds-correction
 """
 
 from __future__ import annotations
@@ -86,52 +89,6 @@ def _load_odds_correction_config(args: argparse.Namespace) -> dict | None:
     return None
 
 
-def _format_ev_info(
-    prediction: pd.DataFrame,
-    race_key: dict[str, str],
-    odds_correction_config: dict,
-) -> str:
-    """オッズ補正後のEV情報を表示する."""
-    from src.model.evaluator import ModelEvaluator
-
-    evaluator = ModelEvaluator()
-    odds_dict = evaluator._get_odds_from_db(race_key)
-    if not odds_dict:
-        return "  (オッズ取得不可)"
-
-    ninki_ranks = evaluator._derive_ninki_rank(odds_dict)
-
-    lines: list[str] = []
-    lines.append("")
-    lines.append(f"{'馬番':>4s}  {'オッズ':>6s}  {'補正後':>6s}  {'確率':>5s}  {'EV':>5s}")
-    lines.append("-" * 38)
-
-    for _, row in prediction.iterrows():
-        umaban = str(row.get("umaban", "")).strip().zfill(2)
-        pred_prob = row["pred_prob"]
-        raw_odds = odds_dict.get(umaban, 0.0)
-        if raw_odds <= 0:
-            continue
-
-        ninki = ninki_ranks.get(umaban, 99)
-        import pandas as pd
-        dummy_row = pd.Series({"post_umaban": int(umaban)})
-        corrected_odds = evaluator._apply_odds_correction(
-            raw_odds, dummy_row, ninki, odds_correction_config,
-        )
-        ev = pred_prob * corrected_odds
-
-        marker = " *" if ev >= 1.1 and pred_prob >= 0.025 else ""
-        lines.append(
-            f"{umaban:>4s}  {raw_odds:>6.1f}  {corrected_odds:>6.1f}  "
-            f"{pred_prob * 100:>4.1f}%  {ev:>5.2f}{marker}"
-        )
-
-    lines.append("")
-    lines.append("* = EV >= 1.1 かつ 予想勝率 >= 2.5%（value_bet候補）")
-    return "\n".join(lines)
-
-
 def main() -> None:
     args = parse_args()
 
@@ -162,28 +119,14 @@ def main() -> None:
             logger.warning("予測結果がありません。")
             return
 
-        for key, pred in results.items():
-            # レースキーを復元して表示
+        for race_key, pred in results:
             if not pred.empty:
                 print()
-                # 簡易表示
-                jyocd = key.split("_")[0]
-                racenum = key.split("_")[1] if "_" in key else ""
-                race_key_for_format = {
-                    "year": args.year,
-                    "monthday": args.monthday,
-                    "jyocd": jyocd,
-                    "kaiji": "",
-                    "nichiji": "",
-                    "racenum": racenum.replace("R", ""),
-                }
-                output = predictor.format_prediction(race_key_for_format, pred)
+                output = predictor.format_prediction(
+                    race_key, pred,
+                    odds_correction_config=odds_correction_config,
+                )
                 print(output)
-                if odds_correction_config:
-                    ev_info = _format_ev_info(
-                        pred, race_key_for_format, odds_correction_config,
-                    )
-                    print(ev_info)
                 print()
 
     else:
@@ -209,14 +152,12 @@ def main() -> None:
             logger.warning("予測結果がありません。")
             return
 
-        output = predictor.format_prediction(race_key, prediction)
+        output = predictor.format_prediction(
+            race_key, prediction,
+            odds_correction_config=odds_correction_config,
+        )
         print()
         print(output)
-        if odds_correction_config:
-            ev_info = _format_ev_info(
-                prediction, race_key, odds_correction_config,
-            )
-            print(ev_info)
         print()
 
 

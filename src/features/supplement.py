@@ -58,10 +58,12 @@ def _get_registry() -> dict[str, type[FeatureExtractor]]:
     """遅延インポートでサプリメント登録簿を返す."""
     from src.features.mining import MiningFeatureExtractor
     from src.features.bms_detail import BMSDetailFeatureExtractor
+    from src.features.rating import RatingFeatureExtractor
 
     return {
         "mining": MiningFeatureExtractor,
         "bms_detail": BMSDetailFeatureExtractor,
+        "rating": RatingFeatureExtractor,
     }
 
 
