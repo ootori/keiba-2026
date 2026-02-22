@@ -150,6 +150,11 @@ def parse_args() -> argparse.Namespace:
         help="学習/評価時にマージするサプリメント名（例: --supplement mining）",
     )
     parser.add_argument(
+        "--calibrate",
+        action="store_true",
+        help="確率キャリブレーション（Isotonic Regression）を適用する",
+    )
+    parser.add_argument(
         "--odds-correction",
         action="store_true",
         help="value_bet戦略でオッズ歪み補正を有効化（統計JSON自動ロード）",
@@ -344,6 +349,7 @@ def step_train(
     target_type: str = "top3",
     odds_correction_config: dict | None = None,
     relevance_mode: str = "default",
+    calibrate: bool = False,
 ) -> None:
     """Step 2: モデル学習 + 評価.
 
@@ -351,6 +357,7 @@ def step_train(
         target_type: "top3"=3着以内, "win"=1着
         odds_correction_config: オッズ歪み補正設定
         relevance_mode: LambdaRank関連度モード ("default" or "win")
+        calibrate: 確率キャリブレーションを適用するか
     """
     # 目的変数カラムの決定
     target_col = "target_win" if target_type == "win" else "target"
@@ -386,7 +393,9 @@ def step_train(
     valid_df = valid_df.dropna(subset=drop_cols).copy()
 
     # 学習
-    trainer = ModelTrainer(ranking=ranking, relevance_mode=relevance_mode)
+    trainer = ModelTrainer(
+        ranking=ranking, relevance_mode=relevance_mode, calibrate=calibrate,
+    )
     model = trainer.train(train_df, valid_df, target_col=target_col)
 
     # 保存
@@ -409,6 +418,7 @@ def step_train(
     metrics = evaluator.evaluate(
         model, valid_df, trainer.feature_columns,
         target_col=target_col, ranking=ranking,
+        calibrator=trainer.calibrator,
     )
 
     logger.info("評価結果:")
@@ -432,6 +442,7 @@ def step_train(
             strategy=strategy, ranking=ranking,
             target_type=target_type,
             odds_correction_config=odds_correction_config,
+            calibrator=trainer.calibrator,
         )
         logger.info(
             "  [%s] 回収率: %.1f%%, 的中率: %.1f%% (%d/%d)",
@@ -476,6 +487,7 @@ def step_eval_only(args: argparse.Namespace) -> None:
     metrics = evaluator.evaluate(
         model, valid_df, trainer.feature_columns,
         target_col=target_col, ranking=ranking,
+        calibrator=trainer.calibrator,
     )
 
     logger.info("評価結果:")
@@ -499,6 +511,7 @@ def step_eval_only(args: argparse.Namespace) -> None:
             strategy=strategy, ranking=ranking,
             target_type=target_type,
             odds_correction_config=odds_correction_config,
+            calibrator=trainer.calibrator,
         )
         logger.info(
             "  [%s] 回収率: %.1f%%, 的中率: %.1f%% (%d/%d)",
@@ -599,6 +612,7 @@ def main() -> None:
             ranking=ranking, target_type=target_type,
             odds_correction_config=odds_correction_config,
             relevance_mode=args.relevance_mode,
+            calibrate=args.calibrate,
         )
 
     elif args.build_features_only:
@@ -613,6 +627,7 @@ def main() -> None:
             ranking=ranking, target_type=target_type,
             odds_correction_config=odds_correction_config,
             relevance_mode=args.relevance_mode,
+            calibrate=args.calibrate,
         )
 
     logger.info("完了!")

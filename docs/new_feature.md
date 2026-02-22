@@ -25,7 +25,7 @@
 | 10 | 特徴量追加 | 競走馬セール価格 | ★★ | 低 | 🔲 未着手 |
 | 11 | 特徴量改善 | 調教特徴量の強化 | ★★★ | 中 | 🔲 未着手 |
 | 12 | モデル改善 | 目的変数の多様化（LambdaRank等） | ★★★★★ | 高 | ✅ 実装済（案A: LambdaRank） |
-| 13 | モデル改善 | 確率キャリブレーション | ★★★★ | 低 | 🔲 未着手 |
+| 13 | モデル改善 | 確率キャリブレーション | ★★★★ | 低 | ✅ 実装済 |
 | 14 | モデル改善 | 特徴量自動選択パイプライン | ★★★ | 中 | 🔲 未着手 |
 | 15 | モデル改善 | オッズ有無の2モデル体制 | ★★★ | 中 | 🔲 未着手 |
 | 16 | 特徴量追加 | 賞金ベース特徴量 | ★★★ | 低 | 🔲 未着手 |
@@ -672,6 +672,34 @@ calibrated_prob = iso_reg.predict(y_pred_raw)
 ### 評価方法
 - **Reliability Diagram**（信頼度図）で校正度を可視化
 - **Brier Score** で確率精度を定量評価
+
+### 実装ノート（2026-02-22 実装済み）
+
+- **実装箇所:**
+  - `src/model/trainer.py`: `_fit_calibrator()` メソッド追加、`save_model()` / `load_model()` でキャリブレータの保存・復元
+  - `src/model/evaluator.py`: `evaluate()` / `simulate_return()` に `calibrator` パラメータ追加、Brier Score 評価
+  - `src/model/predictor.py`: `predict_race()` でキャリブレーション自動適用
+  - `run_train.py`: `--calibrate` CLIオプション追加
+- **採用手法:** Isotonic Regression（`sklearn.isotonic.IsotonicRegression`）
+  - Platt Scaling（ロジスティック回帰）よりもノンパラメトリックで、LightGBMの出力特性に適合しやすい
+  - `out_of_bounds="clip"` で学習範囲外の値も安全にクリップ
+- **提案からの変更点:**
+  - `CalibratedClassifierCV` ではなく `IsotonicRegression` を直接使用（LightGBMのBoosterをsklearn Estimatorとして渡す必要がないため）
+  - 検証データで学習するため、キャリブレーション用の追加分割は行わない（データ量を確保するため）
+- **保存方式:** `{model_name}_calibrator.pkl`（pickle形式）としてモデルと同じディレクトリに保存
+- **メタデータ:** `{model_name}_meta.json` に `calibrated` フラグを追加
+- **適用タイミング:**
+  - 二値分類モデルのみに適用（LambdaRank のスコアは確率ではないため非適用）
+  - `evaluate()`: キャリブレーション前後の Brier Score / LogLoss を比較表示
+  - `simulate_return()`: キャリブレーション後の確率で value_bet の EV 計算
+  - `predict_race()`: キャリブレーション後の確率で予測順位・確率表示
+- **使い方:**
+  - `python run_train.py --calibrate` — 学習時にキャリブレーション適用
+  - `python run_train.py --train-only --calibrate` — 既存特徴量から学習+キャリブレーション
+  - `python run_train.py --eval-only` — キャリブレータは自動ロード（メタデータから検出）
+  - `python run_predict.py` — キャリブレータは自動ロード・自動適用
+- **後方互換性:** `--calibrate` を指定しない場合は従来どおり。既存モデルにキャリブレータファイルがなければ無効化
+- **テスト:** `tests/test_calibration.py`（12テスト）
 
 ---
 

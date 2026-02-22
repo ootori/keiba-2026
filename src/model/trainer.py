@@ -1,15 +1,17 @@
-"""LightGBMモデルの学習（二値分類 + LambdaRank 対応）."""
+"""LightGBMモデルの学習（二値分類 + LambdaRank 対応 + 確率キャリブレーション）."""
 
 from __future__ import annotations
 
 import json
 import logging
+import pickle
 from pathlib import Path
 from typing import Any
 
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+from sklearn.isotonic import IsotonicRegression
 
 from src.config import (
     LGBM_PARAMS,
@@ -27,6 +29,10 @@ class ModelTrainer:
 
     ranking=True を指定すると LambdaRank（ランキング学習）モードになり、
     レース単位の group パラメータを用いて着順ランキングを直接学習する。
+
+    calibrate=True を指定すると、学習後に検証データで Isotonic Regression による
+    確率キャリブレーションを適用する。キャリブレータはモデルと一緒に保存され、
+    予測時に自動的に適用される。
     """
 
     def __init__(
@@ -36,6 +42,7 @@ class ModelTrainer:
         early_stopping_rounds: int = 100,
         ranking: bool = False,
         relevance_mode: str = "default",
+        calibrate: bool = False,
     ) -> None:
         """学習器を初期化する.
 
@@ -47,9 +54,11 @@ class ModelTrainer:
             relevance_mode: LambdaRank 関連度モード
                 "default": 1着=5, 2着=4, 3着=3, 4-5着=1, 6着以下=0
                 "win": 1着=10, 2着=3, 3着=1, 4着以下=0（単勝回収率重視）
+            calibrate: 確率キャリブレーションを適用するか
         """
         self.ranking = ranking
         self.relevance_mode = relevance_mode
+        self.calibrate = calibrate
         if params is not None:
             self.params = params
         elif ranking:
@@ -59,6 +68,7 @@ class ModelTrainer:
         self.num_boost_round = num_boost_round
         self.early_stopping_rounds = early_stopping_rounds
         self.model: lgb.Booster | None = None
+        self.calibrator: IsotonicRegression | None = None
         self.feature_columns: list[str] = []
         self.target_type: str = "top3"
 
@@ -155,6 +165,11 @@ class ModelTrainer:
             self.model.best_iteration,
             best_score,
         )
+
+        # 確率キャリブレーション
+        if self.calibrate:
+            self.calibrator = self._fit_calibrator(X_valid, y_valid)
+
         return self.model
 
     # ------------------------------------------------------------------
@@ -269,6 +284,40 @@ class ModelTrainer:
         )
         return self.model
 
+    def _fit_calibrator(
+        self,
+        X_valid: pd.DataFrame,
+        y_valid: pd.Series,
+    ) -> IsotonicRegression:
+        """検証データで Isotonic Regression キャリブレータを学習する.
+
+        LightGBMの生出力と実際のラベルを用いて、
+        スコア→校正済み確率のマッピングを学習する。
+
+        Args:
+            X_valid: 検証用特徴量
+            y_valid: 検証用ラベル
+
+        Returns:
+            学習済み IsotonicRegression
+        """
+        y_pred_raw = self.model.predict(X_valid)
+
+        calibrator = IsotonicRegression(out_of_bounds="clip")
+        calibrator.fit(y_pred_raw, y_valid)
+
+        # キャリブレーション前後の Brier Score を比較
+        from sklearn.metrics import brier_score_loss
+        brier_before = brier_score_loss(y_valid, y_pred_raw)
+        y_calibrated = calibrator.predict(y_pred_raw)
+        brier_after = brier_score_loss(y_valid, y_calibrated)
+
+        logger.info(
+            "キャリブレーション完了: Brier Score %.6f → %.6f (改善: %.6f)",
+            brier_before, brier_after, brier_before - brier_after,
+        )
+        return calibrator
+
     def _prepare_groups(
         self,
         df: pd.DataFrame,
@@ -375,6 +424,13 @@ class ModelTrainer:
                 f.write(col + "\n")
         logger.info("特徴量リスト保存: %s", feature_path)
 
+        # キャリブレータ保存
+        if self.calibrator is not None:
+            calibrator_path = MODEL_DIR / f"{name}_calibrator.pkl"
+            with open(calibrator_path, "wb") as f:
+                pickle.dump(self.calibrator, f)
+            logger.info("キャリブレータ保存: %s", calibrator_path)
+
         # メタデータ保存（ranking フラグなど）
         meta_path = MODEL_DIR / f"{name}_meta.json"
         meta = {
@@ -383,6 +439,7 @@ class ModelTrainer:
             "target_type": self.target_type,
             "objective": self.params.get("objective", "binary"),
             "num_features": len(self.feature_columns),
+            "calibrated": self.calibrator is not None,
         }
         with open(meta_path, "w") as f:
             json.dump(meta, f, indent=2)
@@ -407,6 +464,16 @@ class ModelTrainer:
             with open(feature_path) as f:
                 self.feature_columns = [line.strip() for line in f if line.strip()]
 
+        # キャリブレータの復元
+        calibrator_path = MODEL_DIR / f"{name}_calibrator.pkl"
+        if calibrator_path.exists():
+            with open(calibrator_path, "rb") as f:
+                self.calibrator = pickle.load(f)
+            self.calibrate = True
+        else:
+            self.calibrator = None
+            self.calibrate = False
+
         # メタデータの復元
         meta_path = MODEL_DIR / f"{name}_meta.json"
         if meta_path.exists():
@@ -416,12 +483,14 @@ class ModelTrainer:
             self.target_type = meta.get("target_type", "top3")
             self.relevance_mode = meta.get("relevance_mode", "default")
             logger.info(
-                "モデルロード: %s (%d特徴量, ranking=%s, target=%s, relevance=%s)",
+                "モデルロード: %s (%d特徴量, ranking=%s, target=%s, "
+                "relevance=%s, calibrated=%s)",
                 model_path,
                 len(self.feature_columns),
                 self.ranking,
                 self.target_type,
                 self.relevance_mode,
+                self.calibrator is not None,
             )
         else:
             logger.info(

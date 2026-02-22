@@ -69,7 +69,7 @@ everydb2/
 │       └── base_time.py              # 基準タイムテーブル（スピード指数用）
 ├── notebooks/
 │   └── exploration.ipynb             # データ探索用ノートブック
-├── models/                           # 学習済みモデル保存先（*.txt, *_features.txt, *_meta.json）
+├── models/                           # 学習済みモデル保存先（*.txt, *_features.txt, *_meta.json, *_calibrator.pkl）
 ├── data/                             # 中間データキャッシュ（*.parquet, base_time_table.csv）
 │   └── supplements/                  # サプリメント（差分特徴量）保存先
 │       ├── mining_2024.parquet       #   マイニング特徴量（年度別）
@@ -82,7 +82,8 @@ everydb2/
     ├── test_mining_supplement.py     # マイニング・サプリメントテスト（16テスト）
     ├── test_bms_detail_supplement.py # BMS条件別サプリメントテスト（10テスト）
     ├── test_rating_supplement.py    # Glickoレーティングサプリメントテスト（21テスト）
-    └── test_odds_correction.py      # オッズ歪み補正テスト（102テスト）
+    ├── test_odds_correction.py      # オッズ歪み補正テスト（102テスト）
+    └── test_calibration.py          # 確率キャリブレーションテスト（12テスト）
 ```
 
 ## データベース接続
@@ -234,6 +235,23 @@ categorical_features = [
 ]
 ```
 
+## 確率キャリブレーション
+
+LightGBMの出力はlogloss最適化されたスコアだが、実際の確率として完全に校正されていない。
+`--calibrate` オプションで Isotonic Regression による確率キャリブレーションを適用できる。
+
+**仕組み:**
+- 学習後、検証データでキャリブレータ（IsotonicRegression）を学習
+- キャリブレータは `{model_name}_calibrator.pkl` として保存
+- 予測時・評価時に自動ロード・適用（二値分類モデルのみ）
+- LambdaRank モデルには非適用（スコアは確率ではないため）
+
+**効果:**
+- value_bet の EV 計算精度が向上（`pred_prob × odds` の pred_prob が正確になる）
+- Brier Score の改善で確率の校正度を定量評価可能
+
+**メタデータ:** `{model_name}_meta.json` に `calibrated` フラグを記録
+
 ## CLIオプション（run_train.py）
 
 ```bash
@@ -293,6 +311,16 @@ python run_train.py --target win --train-only --model-name win_model
 
 # 1着予測モデルの評価のみ（メタデータからtarget_type=winが自動検出される）
 python run_train.py --eval-only --model-name win_model
+
+# === 確率キャリブレーション ===
+# 学習時にIsotonic Regressionキャリブレーションを適用
+python run_train.py --calibrate
+
+# 既存特徴量から学習+キャリブレーション
+python run_train.py --train-only --calibrate
+
+# 評価時はキャリブレータが自動ロード（--calibrate不要）
+python run_train.py --eval-only
 
 # === サプリメント（差分特徴量）===
 # マイニング特徴量をサプリメントとして構築（学習期間〜検証年を一括構築）

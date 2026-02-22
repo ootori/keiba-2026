@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import pickle
 from pathlib import Path
 
 import lightgbm as lgb
 import pandas as pd
+from sklearn.isotonic import IsotonicRegression
 
 from src.config import MODEL_DIR, CATEGORICAL_FEATURES
 from src.db import query_df
@@ -36,6 +38,7 @@ class Predictor:
         self.model: lgb.Booster | None = None
         self.feature_columns: list[str] = []
         self.ranking: bool = False
+        self.calibrator: IsotonicRegression | None = None
         self.pipeline = FeaturePipeline(include_odds=include_odds)
 
     def load(self) -> None:
@@ -54,6 +57,14 @@ class Predictor:
                     line.strip() for line in f if line.strip()
                 ]
 
+        # キャリブレータの復元
+        calibrator_path = MODEL_DIR / f"{self.model_name}_calibrator.pkl"
+        if calibrator_path.exists():
+            with open(calibrator_path, "rb") as f:
+                self.calibrator = pickle.load(f)
+        else:
+            self.calibrator = None
+
         # メタデータから ranking フラグを復元
         meta_path = MODEL_DIR / f"{self.model_name}_meta.json"
         if meta_path.exists():
@@ -62,10 +73,11 @@ class Predictor:
             self.ranking = meta.get("ranking", False)
 
         logger.info(
-            "モデルロード完了: %s (%d特徴量, ranking=%s)",
+            "モデルロード完了: %s (%d特徴量, ranking=%s, calibrated=%s)",
             model_path,
             len(self.feature_columns),
             self.ranking,
+            self.calibrator is not None,
         )
 
     def predict_race(
@@ -97,6 +109,10 @@ class Predictor:
         # 予測
         X = self._prepare_features(features)
         probs = self.model.predict(X)
+
+        # キャリブレーション適用（二値分類モデルのみ）
+        if self.calibrator is not None and not self.ranking:
+            probs = self.calibrator.predict(probs)
 
         # 結果を構成
         result = pd.DataFrame(

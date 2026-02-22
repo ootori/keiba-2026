@@ -8,7 +8,8 @@ from typing import Any
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
-from sklearn.metrics import log_loss, roc_auc_score
+from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 
 from src.db import query_df
 from src.config import RACE_KEY_COLS, CATEGORICAL_FEATURES
@@ -31,6 +32,7 @@ class ModelEvaluator:
         feature_columns: list[str],
         target_col: str = "target",
         ranking: bool = False,
+        calibrator: IsotonicRegression | None = None,
     ) -> dict[str, Any]:
         """検証データでモデルを評価する.
 
@@ -40,6 +42,7 @@ class ModelEvaluator:
             feature_columns: 特徴量カラム
             target_col: 目的変数カラム（二値分類のラベル）
             ranking: LambdaRank モデルか
+            calibrator: 確率キャリブレータ（None の場合はキャリブレーションなし）
 
         Returns:
             評価指標の辞書
@@ -59,6 +62,7 @@ class ModelEvaluator:
             "n_samples": len(y_valid),
             "positive_rate": float(y_valid.mean()),
             "ranking_mode": ranking,
+            "calibrated": calibrator is not None,
         }
 
         if ranking:
@@ -74,8 +78,27 @@ class ModelEvaluator:
             # 二値分類: 従来どおり
             metrics["logloss"] = log_loss(y_valid, y_pred)
             metrics["auc"] = roc_auc_score(y_valid, y_pred)
+            metrics["brier_score_raw"] = brier_score_loss(y_valid, y_pred)
             logger.info("LogLoss: %.6f", metrics["logloss"])
             logger.info("AUC: %.6f", metrics["auc"])
+            logger.info("Brier Score (raw): %.6f", metrics["brier_score_raw"])
+
+            # キャリブレーション適用後の評価
+            if calibrator is not None:
+                y_calibrated = calibrator.predict(y_pred)
+                metrics["logloss_calibrated"] = log_loss(y_valid, y_calibrated)
+                metrics["brier_score_calibrated"] = brier_score_loss(
+                    y_valid, y_calibrated,
+                )
+                logger.info(
+                    "LogLoss (calibrated): %.6f", metrics["logloss_calibrated"],
+                )
+                logger.info(
+                    "Brier Score (calibrated): %.6f",
+                    metrics["brier_score_calibrated"],
+                )
+                # 予測にはキャリブレーション済み確率を使用
+                y_pred = y_calibrated
 
         # レース単位の評価（共通）
         valid_df = valid_df.copy()
@@ -217,6 +240,7 @@ class ModelEvaluator:
         target_type: str = "top3",
         value_bet_config: dict[str, Any] | None = None,
         odds_correction_config: dict[str, Any] | None = None,
+        calibrator: IsotonicRegression | None = None,
     ) -> dict[str, Any]:
         """回収率シミュレーションを実行する.
 
@@ -247,6 +271,7 @@ class ModelEvaluator:
             odds_correction_config: オッズ歪み補正設定（value_bet時のみ有効）
                 - enabled: 補正を有効化するか
                 - rules: 補正ルール辞書
+            calibrator: 確率キャリブレータ（None の場合はキャリブレーションなし）
 
         Returns:
             回収率シミュレーション結果
@@ -259,7 +284,13 @@ class ModelEvaluator:
             if col in X_pred.columns:
                 X_pred[col] = X_pred[col].astype("category")
 
-        df["pred_prob"] = model.predict(X_pred)
+        y_pred = model.predict(X_pred)
+
+        # キャリブレーション適用（二値分類かつ calibrator が指定された場合）
+        if calibrator is not None and not ranking:
+            y_pred = calibrator.predict(y_pred)
+
+        df["pred_prob"] = y_pred
 
         key_cols = [f"_key_{c}" for c in RACE_KEY_COLS if f"_key_{c}" in df.columns]
         if not key_cols:
