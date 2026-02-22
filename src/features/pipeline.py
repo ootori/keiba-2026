@@ -453,8 +453,10 @@ class FeaturePipeline:
             kettonum をインデックスとした DataFrame:
                 - target: 3着以内=1, 他=0（二値分類用）
                 - target_win: 1着=1, 他=0（単勝予測用）
-                - target_relevance: LambdaRank用関連度スコア
+                - target_relevance: LambdaRank用関連度スコア（デフォルト）
                     1着=5, 2着=4, 3着=3, 4着=2, 5着=1, 6着以下=0
+                - target_relevance_win: LambdaRank用（1着重み寄せ）
+                    1着=10, 2着=3, 3着=1, 4着以下=0
                 - kakuteijyuni: 確定着順（生値）
         """
         sql = """
@@ -468,7 +470,13 @@ class FeaturePipeline:
                 WHEN CAST(kakuteijyuni AS integer) = 3 THEN 3
                 WHEN CAST(kakuteijyuni AS integer) <= 5 THEN 1
                 ELSE 0
-            END AS target_relevance
+            END AS target_relevance,
+            CASE
+                WHEN CAST(kakuteijyuni AS integer) = 1 THEN 10
+                WHEN CAST(kakuteijyuni AS integer) = 2 THEN 3
+                WHEN CAST(kakuteijyuni AS integer) = 3 THEN 1
+                ELSE 0
+            END AS target_relevance_win
         FROM n_uma_race
         WHERE year = %(year)s AND monthday = %(monthday)s
           AND jyocd = %(jyocd)s AND kaiji = %(kaiji)s
@@ -479,10 +487,18 @@ class FeaturePipeline:
         df = query_df(sql, race_key)
         if df.empty:
             return pd.DataFrame(
-                columns=["target", "target_win", "target_relevance", "kakuteijyuni"]
+                columns=[
+                    "target", "target_win",
+                    "target_relevance", "target_relevance_win",
+                    "kakuteijyuni",
+                ]
             )
         return df.set_index("kettonum")[
-            ["target", "target_win", "target_relevance", "kakuteijyuni"]
+            [
+                "target", "target_win",
+                "target_relevance", "target_relevance_win",
+                "kakuteijyuni",
+            ]
         ]
 
     # ------------------------------------------------------------------
@@ -515,6 +531,12 @@ class FeaturePipeline:
         ("blood_father_baba_rate", False, "blood"),       # 父産駒馬場状態別複勝率
         ("blood_father_jyo_rate", False, "blood"),        # 父産駒競馬場別複勝率
         ("blood_mother_produce_rate", False, "blood"),    # 母産駒複勝率（0.0=データなし）
+        # 調教師条件別（v2提案A）
+        ("trainer_fukusho_rate_track_type", False, "rate"),  # 調教師芝ダ別複勝率
+        ("trainer_recent_form_30d", False, "rate"),          # 調教師直近30日勝率
+        # フォームモメンタム（v2提案D）
+        ("horse_jyuni_trend_slope", True, "numeric"),        # 着順傾斜（負=改善中、小さい方が良い）
+        ("horse_consecutive_top3", False, "numeric"),        # 連続3着以内回数
     ]
 
     @staticmethod

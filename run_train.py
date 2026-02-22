@@ -132,6 +132,12 @@ def parse_args() -> argparse.Namespace:
         help="目的変数: top3=3着以内（デフォルト）, win=1着",
     )
     parser.add_argument(
+        "--relevance-mode",
+        choices=["default", "win"],
+        default="default",
+        help="LambdaRankの関連度モード: default=均等, win=1着重み寄せ",
+    )
+    parser.add_argument(
         "--build-supplement",
         nargs="+",
         metavar="NAME",
@@ -337,12 +343,14 @@ def step_train(
     ranking: bool = False,
     target_type: str = "top3",
     odds_correction_config: dict | None = None,
+    relevance_mode: str = "default",
 ) -> None:
     """Step 2: モデル学習 + 評価.
 
     Args:
         target_type: "top3"=3着以内, "win"=1着
         odds_correction_config: オッズ歪み補正設定
+        relevance_mode: LambdaRank関連度モード ("default" or "win")
     """
     # 目的変数カラムの決定
     target_col = "target_win" if target_type == "win" else "target"
@@ -378,7 +386,7 @@ def step_train(
     valid_df = valid_df.dropna(subset=drop_cols).copy()
 
     # 学習
-    trainer = ModelTrainer(ranking=ranking)
+    trainer = ModelTrainer(ranking=ranking, relevance_mode=relevance_mode)
     model = trainer.train(train_df, valid_df, target_col=target_col)
 
     # 保存
@@ -590,6 +598,7 @@ def main() -> None:
             train_df, valid_df, args.model_name,
             ranking=ranking, target_type=target_type,
             odds_correction_config=odds_correction_config,
+            relevance_mode=args.relevance_mode,
         )
 
     elif args.build_features_only:
@@ -603,6 +612,7 @@ def main() -> None:
             train_df, valid_df, args.model_name,
             ranking=ranking, target_type=target_type,
             odds_correction_config=odds_correction_config,
+            relevance_mode=args.relevance_mode,
         )
 
     logger.info("完了!")

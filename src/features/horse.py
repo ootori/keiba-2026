@@ -20,6 +20,7 @@ from src.utils.code_master import (
     distance_category,
     baba_code_for_track,
     interval_category,
+    class_level,
 )
 
 
@@ -76,6 +77,13 @@ class HorseFeatureExtractor(FeatureExtractor):
         "interval_is_kyuumei",
         # カテゴリ8: 負担重量（前走差）
         "weight_futan_diff",
+        # フォームモメンタム（v2提案D）
+        "horse_jyuni_trend_slope",
+        "horse_days_since_last_win",
+        "horse_consecutive_top3",
+        "horse_last_vs_best",
+        "horse_improving_flag",
+        "horse_class_first_flag",
     ]
 
     @property
@@ -171,7 +179,8 @@ class HorseFeatureExtractor(FeatureExtractor):
             r.trackcd,
             r.sibababacd,
             r.dirtbabacd,
-            r.gradecd
+            r.gradecd,
+            r.jyokencd5
         FROM n_uma_race ur
         JOIN n_race r USING (year, monthday, jyocd, kaiji, nichiji, racenum)
         WHERE ur.kettonum IN %(kettonums)s
@@ -241,6 +250,9 @@ class HorseFeatureExtractor(FeatureExtractor):
 
         # --- カテゴリ8: 負担重量（前走差） ---
         feat.update(self._calc_futan_diff(horse, h_past))
+
+        # --- フォームモメンタム（v2提案D） ---
+        feat.update(self._calc_form_momentum(h_past, race_date, race_info))
 
         return feat
 
@@ -519,6 +531,119 @@ class HorseFeatureExtractor(FeatureExtractor):
                 result["weight_futan_diff"] = 0.0
         else:
             result["weight_futan_diff"] = 0.0
+
+        return result
+
+    def _calc_form_momentum(
+        self,
+        h_past: pd.DataFrame,
+        race_date: str,
+        race_info: dict[str, str],
+    ) -> dict[str, Any]:
+        """フォームモメンタム特徴量（v2提案D）を計算する.
+
+        Args:
+            h_past: 過去成績 DataFrame（直近順）
+            race_date: 当該レースの日付（YYYYMMDD形式）
+            race_info: 当該レースの条件辞書
+
+        Returns:
+            6特徴量の辞書
+        """
+        result: dict[str, Any] = {}
+
+        if h_past.empty:
+            result["horse_jyuni_trend_slope"] = 0.0
+            result["horse_days_since_last_win"] = MISSING_NUMERIC
+            result["horse_consecutive_top3"] = 0
+            result["horse_last_vs_best"] = MISSING_NUMERIC
+            result["horse_improving_flag"] = 0
+            result["horse_class_first_flag"] = 0
+            return result
+
+        # 着順の数値化
+        jyuni = h_past["kakuteijyuni"].apply(
+            lambda x: self._safe_int(x, default=99)
+        )
+
+        # D1: 着順トレンド傾斜（直近5走の線形回帰、負=改善中）
+        last5 = jyuni.head(5)
+        valid_jyuni = last5[last5 < 99]
+        if len(valid_jyuni) >= 2:
+            x = np.arange(len(valid_jyuni))
+            slope = float(np.polyfit(x, valid_jyuni.values, 1)[0])
+            result["horse_jyuni_trend_slope"] = slope
+        else:
+            result["horse_jyuni_trend_slope"] = 0.0
+
+        # D2: 最終勝利からの日数
+        try:
+            current_dt = datetime.strptime(race_date[:8], "%Y%m%d")
+        except ValueError:
+            current_dt = None
+
+        win_races = h_past[jyuni == 1]
+        if not win_races.empty and current_dt is not None:
+            last_win = win_races.iloc[0]
+            last_win_date = str(last_win["year"]).strip() + str(last_win["monthday"]).strip()
+            try:
+                win_dt = datetime.strptime(last_win_date[:8], "%Y%m%d")
+                result["horse_days_since_last_win"] = (current_dt - win_dt).days
+            except ValueError:
+                result["horse_days_since_last_win"] = MISSING_NUMERIC
+        else:
+            result["horse_days_since_last_win"] = MISSING_NUMERIC
+
+        # D3: 連続3着以内回数
+        consecutive_top3 = 0
+        for j in jyuni:
+            if j <= 3:
+                consecutive_top3 += 1
+            else:
+                break
+        result["horse_consecutive_top3"] = consecutive_top3
+
+        # D4: 前走着順 vs 直近5走ベスト着順の差
+        if len(valid_jyuni) >= 1:
+            last_jyuni = int(jyuni.iloc[0]) if jyuni.iloc[0] < 99 else MISSING_NUMERIC
+            best_jyuni = int(valid_jyuni.min())
+            if last_jyuni != MISSING_NUMERIC:
+                result["horse_last_vs_best"] = last_jyuni - best_jyuni
+            else:
+                result["horse_last_vs_best"] = MISSING_NUMERIC
+        else:
+            result["horse_last_vs_best"] = MISSING_NUMERIC
+
+        # D5: 直近3走で改善中フラグ（着順が単調減少=改善）
+        last3 = jyuni.head(3)
+        valid_last3 = last3[last3 < 99]
+        if len(valid_last3) == 3:
+            vals = valid_last3.values
+            # 古い方から新しい方へ着順が下がっている（改善）: vals[2] < vals[1] < vals[0]
+            # ※ last3は直近順なので、iloc[0]が最新
+            result["horse_improving_flag"] = (
+                1 if vals[0] < vals[1] < vals[2] else 0
+            )
+        else:
+            result["horse_improving_flag"] = 0
+
+        # D6: 昇級初戦フラグ（今回のクラスでの出走が初めて）
+        cur_jyoken = str(race_info.get("jyokencd5", "")).strip()
+        cur_grade = str(race_info.get("gradecd", "")).strip()
+        cur_level = class_level(cur_jyoken, cur_grade)
+        if cur_level >= 0 and not h_past.empty:
+            past_levels = set()
+            for _, row in h_past.iterrows():
+                prev_jyoken = str(row.get("jyokencd5", "")).strip()
+                prev_grade = str(row.get("gradecd", "")).strip()
+                pl = class_level(prev_jyoken, prev_grade)
+                if pl >= 0:
+                    past_levels.add(pl)
+            result["horse_class_first_flag"] = (
+                1 if cur_level not in past_levels else 0
+            )
+        else:
+            result["horse_class_first_flag"] = 0
 
         return result
 

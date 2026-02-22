@@ -35,6 +35,7 @@ class ModelTrainer:
         num_boost_round: int = 3000,
         early_stopping_rounds: int = 100,
         ranking: bool = False,
+        relevance_mode: str = "default",
     ) -> None:
         """学習器を初期化する.
 
@@ -43,8 +44,12 @@ class ModelTrainer:
             num_boost_round: 最大ブースティングラウンド数
             early_stopping_rounds: 早期停止のラウンド数
             ranking: LambdaRank モードで学習するか
+            relevance_mode: LambdaRank 関連度モード
+                "default": 1着=5, 2着=4, 3着=3, 4-5着=1, 6着以下=0
+                "win": 1着=10, 2着=3, 3着=1, 4着以下=0（単勝回収率重視）
         """
         self.ranking = ranking
+        self.relevance_mode = relevance_mode
         if params is not None:
             self.params = params
         elif ranking:
@@ -165,13 +170,27 @@ class ModelTrainer:
 
         目的変数には target_relevance（関連度スコア）を使用し、
         レースキーから group（各レースの出走頭数）を構築して渡す。
+        relevance_mode="win" の場合は target_relevance_win を使用する。
         """
-        relevance_col = "target_relevance"
+        if self.relevance_mode == "win":
+            relevance_col = "target_relevance_win"
+        else:
+            relevance_col = "target_relevance"
+
         if relevance_col not in train_df.columns:
-            raise ValueError(
-                f"LambdaRank モードには '{relevance_col}' カラムが必要です。"
-                " parquet を --force-rebuild で再構築してください。"
-            )
+            # フォールバック: target_relevance_win がない場合はデフォルトを使用
+            if self.relevance_mode == "win" and "target_relevance" in train_df.columns:
+                logger.warning(
+                    "%s が見つかりません。target_relevance にフォールバックします。"
+                    " --force-rebuild で parquet を再構築してください。",
+                    relevance_col,
+                )
+                relevance_col = "target_relevance"
+            else:
+                raise ValueError(
+                    f"LambdaRank モードには '{relevance_col}' カラムが必要です。"
+                    " parquet を --force-rebuild で再構築してください。"
+                )
 
         exclude_cols = self._exclude_cols("target")
         self.feature_columns = self._resolve_features(
@@ -286,6 +305,7 @@ class ModelTrainer:
             "target",
             "target_win",
             "target_relevance",
+            "target_relevance_win",
             "kakuteijyuni",
             "kettonum",
         } | {
@@ -359,6 +379,7 @@ class ModelTrainer:
         meta_path = MODEL_DIR / f"{name}_meta.json"
         meta = {
             "ranking": self.ranking,
+            "relevance_mode": self.relevance_mode,
             "target_type": self.target_type,
             "objective": self.params.get("objective", "binary"),
             "num_features": len(self.feature_columns),
@@ -393,12 +414,14 @@ class ModelTrainer:
                 meta = json.load(f)
             self.ranking = meta.get("ranking", False)
             self.target_type = meta.get("target_type", "top3")
+            self.relevance_mode = meta.get("relevance_mode", "default")
             logger.info(
-                "モデルロード: %s (%d特徴量, ranking=%s, target=%s)",
+                "モデルロード: %s (%d特徴量, ranking=%s, target=%s, relevance=%s)",
                 model_path,
                 len(self.feature_columns),
                 self.ranking,
                 self.target_type,
+                self.relevance_mode,
             )
         else:
             logger.info(

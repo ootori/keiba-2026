@@ -10,6 +10,7 @@ import pandas as pd
 from src.features.base import FeatureExtractor
 from src.db import query_df
 from src.config import MISSING_NUMERIC, MISSING_RATE
+from src.utils.code_master import track_type, distance_category
 
 
 class JockeyTrainerFeatureExtractor(FeatureExtractor):
@@ -33,6 +34,14 @@ class JockeyTrainerFeatureExtractor(FeatureExtractor):
         "trainer_tozai",
         "trainer_jockey_combo_rate",
         "trainer_jockey_combo_runs",
+        # カテゴリ11拡張: 調教師条件別（v2提案A）
+        "trainer_win_rate_track_type",
+        "trainer_fukusho_rate_track_type",
+        "trainer_win_rate_dist_cat",
+        "trainer_win_rate_baba",
+        "trainer_recent_form_30d",
+        "trainer_grade_rate",
+        "trainer_kyuumei_rate",
     ]
 
     @property
@@ -89,6 +98,34 @@ class JockeyTrainerFeatureExtractor(FeatureExtractor):
             horses, race_date
         )
 
+        # レース情報（調教師条件別特徴量用）
+        race_info = self._get_race_info(race_key)
+        trackcd = str(race_info.get("trackcd", "")).strip()
+        current_tt = track_type(trackcd)
+        current_dist = self._safe_int(race_info.get("kyori"), default=0)
+        current_dist_cat = distance_category(current_dist) if current_dist > 0 else ""
+        current_baba = str(race_info.get("sibababacd", "")).strip() if current_tt == "turf" else str(race_info.get("dirtbabacd", "")).strip()
+
+        # 調教師の条件別成績（v2提案A）
+        trainer_track_stats = self._get_trainer_track_stats(
+            chokyo_codes, current_tt, race_date
+        )
+        trainer_dist_stats = self._get_trainer_dist_stats(
+            chokyo_codes, current_dist_cat, race_date
+        )
+        trainer_baba_stats = self._get_trainer_baba_stats(
+            chokyo_codes, current_tt, current_baba, race_date
+        )
+        trainer_recent_stats = self._get_trainer_recent_stats(
+            chokyo_codes, race_date
+        )
+        trainer_grade_stats = self._get_trainer_grade_stats(
+            chokyo_codes, race_date
+        )
+        trainer_kyuumei_stats = self._get_trainer_kyuumei_stats(
+            chokyo_codes, race_date
+        )
+
         results: list[dict[str, Any]] = []
         for _, h in horses.iterrows():
             kn = str(h["kettonum"]).strip()
@@ -143,6 +180,26 @@ class JockeyTrainerFeatureExtractor(FeatureExtractor):
                 "fukusho_rate", MISSING_RATE
             )
             feat["trainer_jockey_combo_runs"] = cs.get("runs", 0)
+
+            # --- 調教師条件別（v2提案A） ---
+            tts = trainer_track_stats.get(cc, {})
+            feat["trainer_win_rate_track_type"] = tts.get("win_rate", MISSING_RATE)
+            feat["trainer_fukusho_rate_track_type"] = tts.get("fukusho_rate", MISSING_RATE)
+
+            tds = trainer_dist_stats.get(cc, {})
+            feat["trainer_win_rate_dist_cat"] = tds.get("win_rate", MISSING_RATE)
+
+            tbs = trainer_baba_stats.get(cc, {})
+            feat["trainer_win_rate_baba"] = tbs.get("win_rate", MISSING_RATE)
+
+            trs = trainer_recent_stats.get(cc, {})
+            feat["trainer_recent_form_30d"] = trs.get("win_rate", MISSING_RATE)
+
+            tgs = trainer_grade_stats.get(cc, {})
+            feat["trainer_grade_rate"] = tgs.get("fukusho_rate", MISSING_RATE)
+
+            tks = trainer_kyuumei_stats.get(cc, {})
+            feat["trainer_kyuumei_rate"] = tks.get("fukusho_rate", MISSING_RATE)
 
             results.append(feat)
 
@@ -460,6 +517,322 @@ class JockeyTrainerFeatureExtractor(FeatureExtractor):
             result[key] = {
                 "fukusho_rate": self._safe_rate(top3, total),
                 "runs": total,
+            }
+        return result
+
+    def _get_race_info(self, race_key: dict[str, str]) -> dict[str, str]:
+        """当該レースの条件（トラック・距離・馬場）を取得する."""
+        sql = """
+        SELECT trackcd, kyori, sibababacd, dirtbabacd
+        FROM n_race
+        WHERE year = %(year)s AND monthday = %(monthday)s
+          AND jyocd = %(jyocd)s AND kaiji = %(kaiji)s
+          AND nichiji = %(nichiji)s AND racenum = %(racenum)s
+        LIMIT 1
+        """
+        df = query_df(sql, race_key)
+        if df.empty:
+            return {}
+        return df.iloc[0].to_dict()
+
+    def _get_trainer_track_stats(
+        self,
+        codes: list[str],
+        current_tt: str,
+        race_date: str,
+    ) -> dict[str, dict[str, float]]:
+        """調教師の芝/ダート別成績（過去2年）を集計する."""
+        if not codes or current_tt not in ("turf", "dirt"):
+            return {}
+        try:
+            year_start = str(int(race_date[:4]) - 2)
+        except ValueError:
+            return {}
+
+        if current_tt == "turf":
+            track_filter = "CAST(r.trackcd AS integer) BETWEEN 10 AND 22"
+        else:
+            track_filter = "CAST(r.trackcd AS integer) BETWEEN 23 AND 29"
+
+        sql = f"""
+        SELECT ur.chokyosicode,
+            COUNT(*) AS total,
+            SUM(CASE WHEN CAST(ur.kakuteijyuni AS integer) = 1 THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN CAST(ur.kakuteijyuni AS integer) <= 3 THEN 1 ELSE 0 END) AS top3
+        FROM n_uma_race ur
+        JOIN n_race r USING (year, monthday, jyocd, kaiji, nichiji, racenum)
+        WHERE ur.chokyosicode IN %(codes)s
+          AND ur.datakubun = '7'
+          AND ur.ijyocd = '0'
+          AND ur.year >= %(year_start)s
+          AND (ur.year || ur.monthday) < %(race_date)s
+          AND {track_filter}
+        GROUP BY ur.chokyosicode
+        """
+        df = query_df(sql, {
+            "codes": tuple(codes),
+            "year_start": year_start,
+            "race_date": race_date,
+        })
+        result: dict[str, dict[str, float]] = {}
+        for _, row in df.iterrows():
+            code = str(row["chokyosicode"]).strip()
+            total = self._safe_int(row.get("total"))
+            result[code] = {
+                "win_rate": self._safe_rate(
+                    self._safe_int(row.get("wins")), total
+                ),
+                "fukusho_rate": self._safe_rate(
+                    self._safe_int(row.get("top3")), total
+                ),
+            }
+        return result
+
+    def _get_trainer_dist_stats(
+        self,
+        codes: list[str],
+        dist_cat: str,
+        race_date: str,
+    ) -> dict[str, dict[str, float]]:
+        """調教師の距離帯別成績（過去2年）を集計する."""
+        if not codes or not dist_cat:
+            return {}
+        try:
+            year_start = str(int(race_date[:4]) - 2)
+        except ValueError:
+            return {}
+
+        dist_ranges = {
+            "short": (0, 1400),
+            "mile": (1401, 1800),
+            "middle": (1801, 2200),
+            "long": (2201, 9999),
+        }
+        lo, hi = dist_ranges.get(dist_cat, (0, 9999))
+
+        sql = """
+        SELECT ur.chokyosicode,
+            COUNT(*) AS total,
+            SUM(CASE WHEN CAST(ur.kakuteijyuni AS integer) = 1 THEN 1 ELSE 0 END) AS wins
+        FROM n_uma_race ur
+        JOIN n_race r USING (year, monthday, jyocd, kaiji, nichiji, racenum)
+        WHERE ur.chokyosicode IN %(codes)s
+          AND ur.datakubun = '7'
+          AND ur.ijyocd = '0'
+          AND ur.year >= %(year_start)s
+          AND (ur.year || ur.monthday) < %(race_date)s
+          AND CAST(r.kyori AS integer) BETWEEN %(dist_lo)s AND %(dist_hi)s
+        GROUP BY ur.chokyosicode
+        """
+        df = query_df(sql, {
+            "codes": tuple(codes),
+            "year_start": year_start,
+            "race_date": race_date,
+            "dist_lo": lo,
+            "dist_hi": hi,
+        })
+        result: dict[str, dict[str, float]] = {}
+        for _, row in df.iterrows():
+            code = str(row["chokyosicode"]).strip()
+            result[code] = {
+                "win_rate": self._safe_rate(
+                    self._safe_int(row.get("wins")),
+                    self._safe_int(row.get("total")),
+                ),
+            }
+        return result
+
+    def _get_trainer_baba_stats(
+        self,
+        codes: list[str],
+        current_tt: str,
+        baba_cd: str,
+        race_date: str,
+    ) -> dict[str, dict[str, float]]:
+        """調教師の馬場状態別成績（過去2年）を集計する."""
+        if not codes or not baba_cd or current_tt not in ("turf", "dirt"):
+            return {}
+        try:
+            year_start = str(int(race_date[:4]) - 2)
+        except ValueError:
+            return {}
+
+        baba_col = "r.sibababacd" if current_tt == "turf" else "r.dirtbabacd"
+
+        sql = f"""
+        SELECT ur.chokyosicode,
+            COUNT(*) AS total,
+            SUM(CASE WHEN CAST(ur.kakuteijyuni AS integer) = 1 THEN 1 ELSE 0 END) AS wins
+        FROM n_uma_race ur
+        JOIN n_race r USING (year, monthday, jyocd, kaiji, nichiji, racenum)
+        WHERE ur.chokyosicode IN %(codes)s
+          AND ur.datakubun = '7'
+          AND ur.ijyocd = '0'
+          AND ur.year >= %(year_start)s
+          AND (ur.year || ur.monthday) < %(race_date)s
+          AND {baba_col} = %(baba_cd)s
+        GROUP BY ur.chokyosicode
+        """
+        df = query_df(sql, {
+            "codes": tuple(codes),
+            "year_start": year_start,
+            "race_date": race_date,
+            "baba_cd": baba_cd,
+        })
+        result: dict[str, dict[str, float]] = {}
+        for _, row in df.iterrows():
+            code = str(row["chokyosicode"]).strip()
+            result[code] = {
+                "win_rate": self._safe_rate(
+                    self._safe_int(row.get("wins")),
+                    self._safe_int(row.get("total")),
+                ),
+            }
+        return result
+
+    def _get_trainer_recent_stats(
+        self,
+        codes: list[str],
+        race_date: str,
+    ) -> dict[str, dict[str, float]]:
+        """調教師の直近30日成績を集計する."""
+        if not codes:
+            return {}
+        try:
+            year = int(race_date[:4])
+            month = int(race_date[4:6])
+            day = int(race_date[6:8])
+            from datetime import datetime, timedelta
+            dt = datetime(year, month, day)
+            dt_30d = dt - timedelta(days=30)
+            date_30d_ago = dt_30d.strftime("%Y%m%d")
+        except (ValueError, IndexError):
+            return {}
+
+        sql = """
+        SELECT ur.chokyosicode,
+            COUNT(*) AS total,
+            SUM(CASE WHEN CAST(ur.kakuteijyuni AS integer) = 1 THEN 1 ELSE 0 END) AS wins
+        FROM n_uma_race ur
+        WHERE ur.chokyosicode IN %(codes)s
+          AND ur.datakubun = '7'
+          AND ur.ijyocd = '0'
+          AND (ur.year || ur.monthday) >= %(date_30d_ago)s
+          AND (ur.year || ur.monthday) < %(race_date)s
+        GROUP BY ur.chokyosicode
+        """
+        df = query_df(sql, {
+            "codes": tuple(codes),
+            "date_30d_ago": date_30d_ago,
+            "race_date": race_date,
+        })
+        result: dict[str, dict[str, float]] = {}
+        for _, row in df.iterrows():
+            code = str(row["chokyosicode"]).strip()
+            result[code] = {
+                "win_rate": self._safe_rate(
+                    self._safe_int(row.get("wins")),
+                    self._safe_int(row.get("total")),
+                ),
+            }
+        return result
+
+    def _get_trainer_grade_stats(
+        self,
+        codes: list[str],
+        race_date: str,
+    ) -> dict[str, dict[str, float]]:
+        """調教師の重賞成績（過去3年）を集計する."""
+        if not codes:
+            return {}
+        try:
+            year_start = str(int(race_date[:4]) - 3)
+        except ValueError:
+            return {}
+
+        sql = """
+        SELECT ur.chokyosicode,
+            COUNT(*) AS total,
+            SUM(CASE WHEN CAST(ur.kakuteijyuni AS integer) <= 3 THEN 1 ELSE 0 END) AS top3
+        FROM n_uma_race ur
+        JOIN n_race r USING (year, monthday, jyocd, kaiji, nichiji, racenum)
+        WHERE ur.chokyosicode IN %(codes)s
+          AND ur.datakubun = '7'
+          AND ur.ijyocd = '0'
+          AND ur.year >= %(year_start)s
+          AND (ur.year || ur.monthday) < %(race_date)s
+          AND r.gradecd IN ('A', 'B', 'C', 'D')
+        GROUP BY ur.chokyosicode
+        """
+        df = query_df(sql, {
+            "codes": tuple(codes),
+            "year_start": year_start,
+            "race_date": race_date,
+        })
+        result: dict[str, dict[str, float]] = {}
+        for _, row in df.iterrows():
+            code = str(row["chokyosicode"]).strip()
+            result[code] = {
+                "fukusho_rate": self._safe_rate(
+                    self._safe_int(row.get("top3")),
+                    self._safe_int(row.get("total")),
+                ),
+            }
+        return result
+
+    def _get_trainer_kyuumei_stats(
+        self,
+        codes: list[str],
+        race_date: str,
+    ) -> dict[str, dict[str, float]]:
+        """調教師の休み明け（90日以上）成績（過去3年）を集計する.
+
+        馬の前走間隔が90日以上のレースにおける調教師の複勝率。
+        """
+        if not codes:
+            return {}
+        try:
+            year_start = str(int(race_date[:4]) - 3)
+        except ValueError:
+            return {}
+
+        sql = """
+        WITH horse_prev AS (
+            SELECT ur.chokyosicode, ur.kettonum,
+                   ur.year, ur.monthday,
+                   LAG(ur.year || ur.monthday) OVER (
+                       PARTITION BY ur.kettonum ORDER BY ur.year, ur.monthday
+                   ) AS prev_date,
+                   CAST(ur.kakuteijyuni AS integer) AS jyuni
+            FROM n_uma_race ur
+            WHERE ur.chokyosicode IN %(codes)s
+              AND ur.datakubun = '7'
+              AND ur.ijyocd = '0'
+              AND ur.year >= %(year_start)s
+              AND (ur.year || ur.monthday) < %(race_date)s
+        )
+        SELECT chokyosicode,
+            COUNT(*) AS total,
+            SUM(CASE WHEN jyuni <= 3 THEN 1 ELSE 0 END) AS top3
+        FROM horse_prev
+        WHERE prev_date IS NOT NULL
+          AND (TO_DATE(year || monthday, 'YYYYMMDD')
+               - TO_DATE(prev_date, 'YYYYMMDD')) >= 90
+        GROUP BY chokyosicode
+        """
+        df = query_df(sql, {
+            "codes": tuple(codes),
+            "year_start": year_start,
+            "race_date": race_date,
+        })
+        result: dict[str, dict[str, float]] = {}
+        for _, row in df.iterrows():
+            code = str(row["chokyosicode"]).strip()
+            result[code] = {
+                "fukusho_rate": self._safe_rate(
+                    self._safe_int(row.get("top3")),
+                    self._safe_int(row.get("total")),
+                ),
             }
         return result
 
