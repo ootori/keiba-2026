@@ -156,7 +156,7 @@ everydb2/
 - **目的変数（二値分類・top3）:** `target` — `KakuteiJyuni` が 1, 2, 3 なら 1、それ以外は 0
 - **目的変数（二値分類・win）:** `target_win` — `KakuteiJyuni` が 1 なら 1、それ以外は 0
 - **目的変数（LambdaRank/default）:** `target_relevance` — 関連度スコア（1着=5, 2着=4, 3着=3, 4着=2, 5着=1, 6着以下=0）
-- **目的変数（LambdaRank/win）:** `target_relevance_win` — 1着重み寄せスコア（1着=10, 2着=3, 3着=1, 4着以下=0）
+- **目的変数（LambdaRank/win）:** `target_relevance_win` — 1着重み+2着強化スコア（1着=7, 2着=5, 3着=2, 4着=1, 5着以下=0）
 - **データリーク防止:** 特徴量は必ず「当該レースより過去のデータ」のみで構成
 
 ### 学習/評価の時間分割

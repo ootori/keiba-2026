@@ -53,7 +53,7 @@ class ModelTrainer:
             ranking: LambdaRank モードで学習するか
             relevance_mode: LambdaRank 関連度モード
                 "default": 1着=5, 2着=4, 3着=3, 4-5着=1, 6着以下=0
-                "win": 1着=10, 2着=3, 3着=1, 4着以下=0（単勝回収率重視）
+                "win": 1着=7, 2着=5, 3着=2, 4-5着=1, 6着以下=0（1着重み+2着強化）
             calibrate: 確率キャリブレーションを適用するか
         """
         self.ranking = ranking

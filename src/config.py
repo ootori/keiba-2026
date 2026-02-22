@@ -102,7 +102,7 @@ LGBM_PARAMS: dict = {
 LGBM_PARAMS_RANKING: dict = {
     "objective": "lambdarank",
     "metric": "ndcg",
-    "ndcg_eval_at": [1, 3, 5],
+    "ndcg_eval_at": [1, 2, 3, 5],
     "boosting_type": "gbdt",
     "num_leaves": 63,
     "learning_rate": 0.05,

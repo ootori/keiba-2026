@@ -12,7 +12,7 @@ from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 
 from src.db import query_df
-from src.config import RACE_KEY_COLS, CATEGORICAL_FEATURES
+from src.config import RACE_KEY_COLS, CATEGORICAL_FEATURES, LGBM_PARAMS_RANKING
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ class ModelEvaluator:
             NDCG 指標の辞書
         """
         if ks is None:
-            ks = [1, 3, 5]
+            ks = LGBM_PARAMS_RANKING.get("ndcg_eval_at", [1, 3, 5])
 
         relevance_col = "target_relevance"
         if relevance_col not in valid_df.columns:

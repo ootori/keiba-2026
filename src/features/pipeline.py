@@ -455,8 +455,8 @@ class FeaturePipeline:
                 - target_win: 1着=1, 他=0（単勝予測用）
                 - target_relevance: LambdaRank用関連度スコア（デフォルト）
                     1着=5, 2着=4, 3着=3, 4着=2, 5着=1, 6着以下=0
-                - target_relevance_win: LambdaRank用（1着重み寄せ）
-                    1着=10, 2着=3, 3着=1, 4着以下=0
+                - target_relevance_win: LambdaRank用（1着重み寄せ+2着強化）
+                    1着=7, 2着=5, 3着=2, 4着=1, 5着以下=0
                 - kakuteijyuni: 確定着順（生値）
         """
         sql = """
@@ -472,9 +472,10 @@ class FeaturePipeline:
                 ELSE 0
             END AS target_relevance,
             CASE
-                WHEN CAST(kakuteijyuni AS integer) = 1 THEN 10
-                WHEN CAST(kakuteijyuni AS integer) = 2 THEN 3
-                WHEN CAST(kakuteijyuni AS integer) = 3 THEN 1
+                WHEN CAST(kakuteijyuni AS integer) = 1 THEN 7
+                WHEN CAST(kakuteijyuni AS integer) = 2 THEN 5
+                WHEN CAST(kakuteijyuni AS integer) = 3 THEN 2
+                WHEN CAST(kakuteijyuni AS integer) <= 5 THEN 1
                 ELSE 0
             END AS target_relevance_win
         FROM n_uma_race
