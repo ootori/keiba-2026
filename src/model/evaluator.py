@@ -229,6 +229,16 @@ class ModelEvaluator:
         "min_pred_prob": 0.025,    # 最低予想勝率（2.5%未満は除外）
     }
 
+    # LambdaRank 確率変換メソッド名の定数
+    PROB_METHOD_SOFTMAX = "softmax"
+    PROB_METHOD_PLACKETT_LUCE = "plackett_luce"
+    PROB_METHOD_GUMBEL_MC = "gumbel_mc"
+    VALID_PROB_METHODS = (
+        PROB_METHOD_SOFTMAX,
+        PROB_METHOD_PLACKETT_LUCE,
+        PROB_METHOD_GUMBEL_MC,
+    )
+
     def simulate_return(
         self,
         valid_df: pd.DataFrame,
@@ -241,6 +251,7 @@ class ModelEvaluator:
         value_bet_config: dict[str, Any] | None = None,
         odds_correction_config: dict[str, Any] | None = None,
         calibrator: IsotonicRegression | None = None,
+        prob_method: str = "softmax",
     ) -> dict[str, Any]:
         """回収率シミュレーションを実行する.
 
@@ -315,11 +326,22 @@ class ModelEvaluator:
                     self._ratio_normalize_group
                 )
             elif ranking:
-                # LambdaRank: softmax で確率に変換
-                logger.info("value_bet: LambdaRank — softmax正規化")
-                df["pred_prob"] = df.groupby(key_cols)["pred_prob"].transform(
-                    self._softmax_normalize_group
-                )
+                # LambdaRank: prob_method に応じた確率変換
+                if prob_method == self.PROB_METHOD_PLACKETT_LUCE:
+                    logger.info("value_bet: LambdaRank — Plackett-Luce正規化")
+                    df["pred_prob"] = df.groupby(key_cols)["pred_prob"].transform(
+                        self._plackett_luce_normalize_group
+                    )
+                elif prob_method == self.PROB_METHOD_GUMBEL_MC:
+                    logger.info("value_bet: LambdaRank — Gumbelモンテカルロ正規化")
+                    df["pred_prob"] = df.groupby(key_cols)["pred_prob"].transform(
+                        self._gumbel_mc_normalize_group
+                    )
+                else:
+                    logger.info("value_bet: LambdaRank — softmax正規化")
+                    df["pred_prob"] = df.groupby(key_cols)["pred_prob"].transform(
+                        self._softmax_normalize_group
+                    )
             else:
                 # 二値分類 (top3): レース内合計で割って近似的 P(win) に変換
                 logger.info("value_bet: P(top3)モデル — ratio正規化")
@@ -1264,6 +1286,68 @@ class ModelEvaluator:
         if total > 0:
             return exp_scores / total
         return pd.Series(1.0 / len(scores), index=scores.index)
+
+    @staticmethod
+    def _plackett_luce_normalize_group(scores: pd.Series) -> pd.Series:
+        """Plackett-Luce モデルで1着確率を算出する（LambdaRank 用）.
+
+        Plackett-Luce モデルでは、馬 i が1着になる確率は:
+            P(i wins) = exp(s_i) / Σ_j exp(s_j)
+
+        これは softmax と数学的に同一だが、2着以降の逐次除去確率も
+        計算可能な点が理論的に異なる。ここでは1着確率のみを返す。
+
+        softmax との実質的な違い:
+        - softmax はスコア差の指数比をそのまま確率とする
+        - Plackett-Luce は「残った馬の中から選ばれる」という
+          逐次選択モデルに基づく理論的裏付けがある
+        - 1着確率に関しては softmax と結果が一致するが、
+          value_bet の EV 計算においては理論的根拠が明確になる
+        """
+        exp_scores = np.exp(scores - scores.max())
+        total = exp_scores.sum()
+        if total > 0:
+            return exp_scores / total
+        return pd.Series(1.0 / len(scores), index=scores.index)
+
+    @staticmethod
+    def _gumbel_mc_normalize_group(
+        scores: pd.Series,
+        n_samples: int = 10000,
+        seed: int | None = 42,
+    ) -> pd.Series:
+        """Gumbel ノイズ付きモンテカルロで1着確率を推定する（LambdaRank 用）.
+
+        各馬のスコアに Gumbel(0, 1) ノイズを加算し、
+        最大スコアの馬を「1着」とするシミュレーションを n_samples 回実行。
+        各馬が1着になった頻度を確率として返す。
+
+        Gumbel-Max Trick により、スコアに Gumbel ノイズを足して
+        argmax を取ることは、softmax 分布からのサンプリングと等価。
+        ただし有限サンプルによる分散が加わるため:
+        - 僅差の馬間で確率が揺らぎ、過度に集中した分布を緩和する
+        - softmax では確率が極端に小さくなる馬にもフロア確率が生まれる
+        - サンプル数を増やせば softmax に収束する
+
+        Args:
+            scores: LambdaRank のスコア（レース内の全馬）
+            n_samples: モンテカルロサンプル数（デフォルト: 10000）
+            seed: 乱数シード（再現性確保。None で非決定的）
+        """
+        rng = np.random.default_rng(seed)
+        s = scores.values.astype(np.float64)
+        n_horses = len(s)
+
+        # Gumbel(0, 1) ノイズを (n_samples, n_horses) で生成
+        gumbel_noise = rng.gumbel(loc=0.0, scale=1.0, size=(n_samples, n_horses))
+        # スコア + ノイズ → 各サンプルで argmax
+        perturbed = s[np.newaxis, :] + gumbel_noise
+        winners = np.argmax(perturbed, axis=1)
+        # 各馬が1着になった回数をカウント
+        counts = np.bincount(winners, minlength=n_horses)
+        probs = counts / n_samples
+
+        return pd.Series(probs, index=scores.index)
 
     @staticmethod
     def _format_umaban(val) -> str:

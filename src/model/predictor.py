@@ -184,6 +184,7 @@ class Predictor:
         race_key: dict[str, str],
         prediction: pd.DataFrame,
         odds_correction_config: dict | None = None,
+        prob_method: str = "softmax",
     ) -> str:
         """予測結果をフォーマットして出力する.
 
@@ -193,6 +194,8 @@ class Predictor:
             race_key: レースキー辞書
             prediction: predict_race() の結果
             odds_correction_config: オッズ補正設定（Noneの場合は補正なし）
+            prob_method: LambdaRankの確率変換方式
+                ("softmax", "plackett_luce", "gumbel_mc")
 
         Returns:
             フォーマットされた予測結果文字列
@@ -220,16 +223,21 @@ class Predictor:
                 lines[0] += f" {race_name.strip()}"
             lines.append(f"{track_name}{distance}m {baba} {tosu}頭 {grade}")
 
-        # モデル出力をレース内合計で割って正規化（合計100%にする）
-        # LambdaRank の場合は softmax、二値分類の場合は ratio 正規化
+        # モデル出力をレース内で正規化（合計100%にする）
+        # LambdaRank の場合は prob_method に応じて変換、二値分類の場合は ratio 正規化
         import numpy as np
         raw_probs = prediction["pred_prob"].copy()
         if self.ranking:
-            exp_scores = np.exp(raw_probs - raw_probs.max())
-            total = exp_scores.sum()
-            if total > 0:
-                prediction = prediction.copy()
-                prediction["pred_prob"] = exp_scores / total
+            from src.model.evaluator import ModelEvaluator
+            if prob_method == "plackett_luce":
+                normalized = ModelEvaluator._plackett_luce_normalize_group(raw_probs)
+            elif prob_method == "gumbel_mc":
+                normalized = ModelEvaluator._gumbel_mc_normalize_group(raw_probs)
+            else:
+                # softmax（デフォルト）
+                normalized = ModelEvaluator._softmax_normalize_group(raw_probs)
+            prediction = prediction.copy()
+            prediction["pred_prob"] = normalized
         else:
             total = raw_probs.sum()
             if total > 0:

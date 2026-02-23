@@ -67,6 +67,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="オッズ歪み補正を適用したEV情報を表示",
     )
+    parser.add_argument(
+        "--prob-method",
+        choices=["softmax", "plackett_luce", "gumbel_mc"],
+        default="softmax",
+        help=(
+            "LambdaRankの確率変換方式（デフォルト: softmax）。"
+            "plackett_luce=Plackett-Luce変換、gumbel_mc=Gumbelモンテカルロ"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -125,6 +134,7 @@ def main() -> None:
                 output = predictor.format_prediction(
                     race_key, pred,
                     odds_correction_config=odds_correction_config,
+                    prob_method=args.prob_method,
                 )
                 print(output)
                 print()
@@ -155,6 +165,7 @@ def main() -> None:
         output = predictor.format_prediction(
             race_key, prediction,
             odds_correction_config=odds_correction_config,
+            prob_method=args.prob_method,
         )
         print()
         print(output)

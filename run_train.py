@@ -174,6 +174,15 @@ def parse_args() -> argparse.Namespace:
         default="2024",
         help="オッズ統計の集計終了年（デフォルト: 2024）",
     )
+    parser.add_argument(
+        "--prob-method",
+        choices=["softmax", "plackett_luce", "gumbel_mc"],
+        default="softmax",
+        help=(
+            "LambdaRankの確率変換方式（デフォルト: softmax）。"
+            "plackett_luce=Plackett-Luce変換、gumbel_mc=Gumbelモンテカルロ"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -350,6 +359,7 @@ def step_train(
     odds_correction_config: dict | None = None,
     relevance_mode: str = "default",
     calibrate: bool = False,
+    prob_method: str = "softmax",
 ) -> None:
     """Step 2: モデル学習 + 評価.
 
@@ -358,6 +368,7 @@ def step_train(
         odds_correction_config: オッズ歪み補正設定
         relevance_mode: LambdaRank関連度モード ("default" or "win")
         calibrate: 確率キャリブレーションを適用するか
+        prob_method: LambdaRankの確率変換方式
     """
     # 目的変数カラムの決定
     target_col = "target_win" if target_type == "win" else "target"
@@ -443,6 +454,7 @@ def step_train(
             target_type=target_type,
             odds_correction_config=odds_correction_config,
             calibrator=trainer.calibrator,
+            prob_method=prob_method,
         )
         logger.info(
             "  [%s] 回収率: %.1f%%, 的中率: %.1f%% (%d/%d)",
@@ -512,6 +524,7 @@ def step_eval_only(args: argparse.Namespace) -> None:
             target_type=target_type,
             odds_correction_config=odds_correction_config,
             calibrator=trainer.calibrator,
+            prob_method=args.prob_method,
         )
         logger.info(
             "  [%s] 回収率: %.1f%%, 的中率: %.1f%% (%d/%d)",
@@ -613,6 +626,7 @@ def main() -> None:
             odds_correction_config=odds_correction_config,
             relevance_mode=args.relevance_mode,
             calibrate=args.calibrate,
+            prob_method=args.prob_method,
         )
 
     elif args.build_features_only:
@@ -628,6 +642,7 @@ def main() -> None:
             odds_correction_config=odds_correction_config,
             relevance_mode=args.relevance_mode,
             calibrate=args.calibrate,
+            prob_method=args.prob_method,
         )
 
     logger.info("完了!")
