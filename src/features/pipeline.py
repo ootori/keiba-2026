@@ -112,6 +112,8 @@ class FeaturePipeline:
             names.extend(ext.feature_names)
         # クロス特徴量
         names.extend(self._cross_feature_names())
+        # ペース構造特徴量
+        names.extend(self._pace_feature_names())
         # レース内相対特徴量
         names.extend(self._relative_feature_names())
         return names
@@ -166,6 +168,9 @@ class FeaturePipeline:
 
         # クロス特徴量を追加
         result = self._add_cross_features(result, race_key)
+
+        # ペース構造特徴量を追加
+        result = self._add_pace_features(result)
 
         # レース内相対特徴量を追加
         result = self._add_relative_features(result)
@@ -538,6 +543,9 @@ class FeaturePipeline:
         # フォームモメンタム（v2提案D）
         ("horse_jyuni_trend_slope", True, "numeric"),        # 着順傾斜（負=改善中、小さい方が良い）
         ("horse_consecutive_top3", False, "numeric"),        # 連続3着以内回数
+        # 2着固有特徴量
+        ("horse_2nd_rate", False, "rate"),                    # 2着率（0.0=正当な値）
+        ("horse_exacta_tendency", False, "numeric"),          # exacta傾向（高い=2着が多い）
     ]
 
     @staticmethod
@@ -599,6 +607,87 @@ class FeaturePipeline:
             result[f"rel_{feat_name}_rank"] = col.rank(
                 ascending=ascending, method="min", na_option="bottom",
             ).fillna(len(result))
+
+        return result
+
+    # ------------------------------------------------------------------
+    # ペース構造特徴量（v2提案E）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _pace_feature_names() -> list[str]:
+        """ペース構造特徴量名のリストを返す."""
+        return [
+            "race_n_front_runners",
+            "race_pace_expected",
+            "horse_style_vs_pace",
+            "race_avg_speed_index",
+            "race_max_speed_index",
+        ]
+
+    def _add_pace_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """レース内のペース構造特徴量を追加する.
+
+        既存の個馬特徴量をレース全体で集計し、展開予測に役立つ
+        レース構造情報を生成する。新規SQLは不要。
+
+        Args:
+            df: 1レース分の特徴量 DataFrame（kettonum がインデックス）
+
+        Returns:
+            ペース構造特徴量を追加した DataFrame
+        """
+        result = df.copy()
+
+        # E1: 逃げ・先行馬の頭数
+        if "style_type_mode_last5" in result.columns:
+            front = result["style_type_mode_last5"].astype(str).isin(["1", "2"])
+            result["race_n_front_runners"] = int(front.sum())
+        else:
+            result["race_n_front_runners"] = 0
+
+        # E2: 予想ペース（全出走馬の先行率の平均、高いほどハイペース予想）
+        if "style_front_ratio_last5" in result.columns:
+            avg_front = pd.to_numeric(
+                result["style_front_ratio_last5"], errors="coerce",
+            ).mean()
+            pace_val = float(avg_front) if pd.notna(avg_front) else 0.0
+            result["race_pace_expected"] = pace_val
+        else:
+            pace_val = 0.0
+            result["race_pace_expected"] = 0.0
+
+        # E3: 脚質×ペース相性
+        # 差し・追込馬はハイペースほど有利（正値）
+        # 逃げ・先行馬はスローほど有利（負値で有利 → ペース低いほど正値大）
+        if "style_type_mode_last5" in result.columns:
+            style_col = result["style_type_mode_last5"].astype(str)
+            affinity = pd.Series(0.0, index=result.index)
+            # 差し・追込: pace_val がそのまま有利度
+            affinity[style_col.isin(["3", "4"])] = pace_val
+            # 逃げ・先行: pace_val の逆符号（スローなら正）
+            affinity[style_col.isin(["1", "2"])] = -pace_val
+            result["horse_style_vs_pace"] = affinity
+        else:
+            result["horse_style_vs_pace"] = 0.0
+
+        # E4, E5: レースレベル（speed_index_avg_last3 のレース内統計）
+        if "speed_index_avg_last3" in result.columns:
+            si = pd.to_numeric(
+                result["speed_index_avg_last3"].replace(
+                    MISSING_NUMERIC, np.nan,
+                ),
+                errors="coerce",
+            )
+            result["race_avg_speed_index"] = (
+                float(si.mean()) if si.notna().any() else 0.0
+            )
+            result["race_max_speed_index"] = (
+                float(si.max()) if si.notna().any() else 0.0
+            )
+        else:
+            result["race_avg_speed_index"] = 0.0
+            result["race_max_speed_index"] = 0.0
 
         return result
 

@@ -48,6 +48,11 @@ class HorseFeatureExtractor(FeatureExtractor):
         "horse_last_jyuni",
         "horse_last2_jyuni",
         "horse_best_jyuni_last5",
+        # 2着固有特徴量（2着予測精度向上）
+        "horse_2nd_rate",
+        "horse_2nd_rate_last5",
+        "horse_exacta_tendency",
+        "speed_beaten_margin_avg",
         # カテゴリ3: 条件別成績
         "horse_turf_fukusho_rate",
         "horse_dirt_fukusho_rate",
@@ -168,6 +173,7 @@ class HorseFeatureExtractor(FeatureExtractor):
             ur.kakuteijyuni,
             ur.time,
             ur.harontimel3,
+            ur.timediff,
             ur.futan,
             ur.bataijyu,
             ur.kisyucode,
@@ -275,6 +281,11 @@ class HorseFeatureExtractor(FeatureExtractor):
             result["horse_last_jyuni"] = MISSING_NUMERIC
             result["horse_last2_jyuni"] = MISSING_NUMERIC
             result["horse_best_jyuni_last5"] = MISSING_NUMERIC
+            # 2着固有特徴量
+            result["horse_2nd_rate"] = MISSING_RATE
+            result["horse_2nd_rate_last5"] = MISSING_RATE
+            result["horse_exacta_tendency"] = MISSING_NUMERIC
+            result["speed_beaten_margin_avg"] = MISSING_NUMERIC
             return result
 
         # 着順を数値化
@@ -313,6 +324,46 @@ class HorseFeatureExtractor(FeatureExtractor):
         result["horse_last_jyuni"] = int(jyuni.iloc[0]) if total > 0 else MISSING_NUMERIC
         result["horse_last2_jyuni"] = int(jyuni.iloc[1]) if total > 1 else MISSING_NUMERIC
         result["horse_best_jyuni_last5"] = int(last5.min()) if n5 > 0 else MISSING_NUMERIC
+
+        # --- 2着固有特徴量 ---
+        # 2着率（全走）
+        second_count = int((jyuni == 2).sum())
+        result["horse_2nd_rate"] = self._safe_rate(second_count, total)
+
+        # 2着率（直近5走）
+        second_count_last5 = int((last5 == 2).sum())
+        result["horse_2nd_rate_last5"] = self._safe_rate(second_count_last5, n5)
+
+        # exacta傾向（2着率 / 勝率 の比率 → 1超=勝つより2着が多い馬）
+        win_rate = result["horse_win_rate"]
+        rate_2nd = result["horse_2nd_rate"]
+        if win_rate > 0 and rate_2nd >= 0:
+            result["horse_exacta_tendency"] = float(rate_2nd / win_rate)
+        elif rate_2nd > 0:
+            # 勝率0%だが2着がある → 高い exacta_tendency
+            result["horse_exacta_tendency"] = float(rate_2nd * total)
+        else:
+            result["horse_exacta_tendency"] = MISSING_NUMERIC
+
+        # 1着とのタイム差平均（2着 or 3着時のみ、timediff は10倍値）
+        # 僅差2着が多い馬 vs 離されて2着の馬を区別する
+        if "timediff" in h_past.columns:
+            top23_mask = jyuni.isin([2, 3])
+            if top23_mask.any():
+                td_vals = h_past.loc[top23_mask, "timediff"].apply(
+                    lambda x: self._safe_float(x, default=np.nan)
+                ).dropna()
+                if len(td_vals) > 0:
+                    # timediff は10倍値 (e.g. 5 = 0.5秒差)、正数に変換
+                    result["speed_beaten_margin_avg"] = float(
+                        td_vals.abs().mean()
+                    ) / 10.0
+                else:
+                    result["speed_beaten_margin_avg"] = MISSING_NUMERIC
+            else:
+                result["speed_beaten_margin_avg"] = MISSING_NUMERIC
+        else:
+            result["speed_beaten_margin_avg"] = MISSING_NUMERIC
 
         return result
 

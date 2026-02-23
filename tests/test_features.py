@@ -290,8 +290,8 @@ class TestHorseFeatureExtractor:
         from src.features.horse import HorseFeatureExtractor
 
         ext = HorseFeatureExtractor()
-        # 馬基本5 + 過去成績13 + 条件別14 + 馬体重5 + 間隔5 + 負担重量差1 = 43
-        assert len(ext.feature_names) == 43
+        # 馬基本5 + 過去成績13 + 2着固有4 + 条件別14 + 馬体重5 + 間隔5 + 負担重量差1 + フォームモメンタム6 = 53
+        assert len(ext.feature_names) == 53
 
 
 class TestSpeedStyleFeatureExtractor:
@@ -341,9 +341,9 @@ class TestFeaturePipeline:
         from src.features.pipeline import FeaturePipeline
 
         names = FeaturePipeline._relative_feature_names()
-        # 18ターゲット × 2（zscore + rank） = 36
-        # (既存14 + 新規血統4: nicks_rate, father_baba_rate, father_jyo_rate, mother_produce_rate)
-        assert len(names) == 36
+        # 24ターゲット × 2（zscore + rank） = 48
+        # (既存14 + 血統4 + 調教師2 + フォームモメンタム2 + 2着固有2)
+        assert len(names) == 48
         assert "rel_speed_index_avg_last3_zscore" in names
         assert "rel_speed_index_avg_last3_rank" in names
         assert "rel_horse_fukusho_rate_zscore" in names
@@ -621,10 +621,10 @@ class TestTotalFeatureCount:
         pipeline = FeaturePipeline(include_odds=True)
         names = pipeline.feature_names
 
-        # 基本約127 + クロス8 + 相対36 = 約171特徴量
-        # (血統新規8特徴量 + 相対4新規×2=8追加)
-        assert len(names) >= 150, f"特徴量が少なすぎます: {len(names)}"
-        assert len(names) <= 200, f"特徴量が多すぎます: {len(names)}"
+        # 基本約131 + クロス10 + ペース5 + 相対48 = 約209特徴量
+        # (2着固有4 + ペース構造5 + 相対追加12)
+        assert len(names) >= 190, f"特徴量が少なすぎます: {len(names)}"
+        assert len(names) <= 230, f"特徴量が多すぎます: {len(names)}"
 
         # 重複がないこと
         assert len(names) == len(set(names)), (
