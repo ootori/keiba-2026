@@ -393,6 +393,28 @@ python run_predict.py --year 2025 --monthday 0622 --all-day --prob-method placke
 
 # オッズ補正 + Gumbel モンテカルロ
 python run_train.py --eval-only --model-name ranking_model --odds-correction --prob-method gumbel_mc
+
+# === ハイパーパラメータチューニング（Optuna） ===
+# LambdaRank のハイパーパラメータを Optuna で最適化（100試行）
+python run_train.py --tune --model-name ranking_tuned
+
+# 試行回数とタイムアウトを指定
+python run_train.py --tune --n-trials 200 --tune-timeout 7200 --model-name ranking_tuned
+
+# 1着重み寄せモードでチューニング
+python run_train.py --tune --relevance-mode win --model-name ranking_win_tuned
+
+# サプリメント付きでチューニング
+python run_train.py --tune --supplement mining bms_detail rating --model-name ranking_all_tuned
+
+# NDCG@1 で最適化（単勝特化）
+python run_train.py --tune --ndcg-at 1 --model-name ranking_win_tuned
+
+# NDCG@5 で最適化（より広い順位精度）
+python run_train.py --tune --ndcg-at 5 --model-name ranking_wide_tuned
+
+# 保存済みベストパラメータで再学習
+python run_train.py --use-best-params --model-name ranking_tuned
 ```
 
 ## 特徴量の年度別保存と並列構築

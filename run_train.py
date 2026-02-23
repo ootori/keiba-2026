@@ -46,6 +46,7 @@ from src.config import (
     DATA_DIR,
     MODEL_DIR,
     LGBM_PARAMS,
+    LGBM_PARAMS_RANKING,
     DEFAULT_ODDS_CORRECTION_CONFIG,
     ODDS_CORRECTION_STATS_PATH,
 )
@@ -182,6 +183,34 @@ def parse_args() -> argparse.Namespace:
             "LambdaRankの確率変換方式（デフォルト: softmax）。"
             "plackett_luce=Plackett-Luce変換、gumbel_mc=Gumbelモンテカルロ"
         ),
+    )
+    parser.add_argument(
+        "--tune",
+        action="store_true",
+        help="Optunaでハイパーパラメータチューニングを実行（LambdaRankのみ）",
+    )
+    parser.add_argument(
+        "--n-trials",
+        type=int,
+        default=100,
+        help="チューニングの試行回数（デフォルト: 100）",
+    )
+    parser.add_argument(
+        "--tune-timeout",
+        type=int,
+        default=None,
+        help="チューニングのタイムアウト（秒）。未指定の場合は無制限",
+    )
+    parser.add_argument(
+        "--use-best-params",
+        action="store_true",
+        help="保存済みのベストパラメータを使って学習する",
+    )
+    parser.add_argument(
+        "--ndcg-at",
+        type=int,
+        default=3,
+        help="チューニングで最適化する NDCG@k の k 値（デフォルト: 3）",
     )
     return parser.parse_args()
 
@@ -350,6 +379,81 @@ def step_load_features(
     return train_df, valid_df
 
 
+def step_evaluate_and_simulate(
+    trainer: ModelTrainer,
+    valid_df: pd.DataFrame,
+    target_type: str = "top3",
+    ranking: bool = False,
+    odds_correction_config: dict | None = None,
+    prob_method: str = "softmax",
+) -> None:
+    """Steps 3-5: 特徴量重要度 + 評価 + 回収率シミュレーション.
+
+    Args:
+        trainer: 学習済み ModelTrainer
+        valid_df: 検証データ
+        target_type: "top3" or "win"
+        ranking: LambdaRank モードか
+        odds_correction_config: オッズ歪み補正設定
+        prob_method: LambdaRankの確率変換方式
+    """
+    target_col = "target_win" if target_type == "win" else "target"
+    model = trainer.model
+
+    # 特徴量重要度
+    logger.info("=" * 60)
+    logger.info("Step 3: 特徴量重要度")
+    logger.info("=" * 60)
+    imp = trainer.get_feature_importance(top_n=30)
+    logger.info("Top 30 特徴量重要度:")
+    for _, row in imp.iterrows():
+        logger.info("  %s: %.1f", row["feature"], row["importance"])
+
+    # 評価
+    logger.info("=" * 60)
+    logger.info("Step 4: モデル評価")
+    logger.info("=" * 60)
+    evaluator = ModelEvaluator()
+    metrics = evaluator.evaluate(
+        model, valid_df, trainer.feature_columns,
+        target_col=target_col, ranking=ranking,
+        calibrator=trainer.calibrator,
+    )
+
+    logger.info("評価結果:")
+    for k, v in metrics.items():
+        if isinstance(v, float):
+            logger.info("  %s: %.4f", k, v)
+        else:
+            logger.info("  %s: %s", k, v)
+
+    # 回収率シミュレーション
+    logger.info("=" * 60)
+    logger.info("Step 5: 回収率シミュレーション")
+    logger.info("=" * 60)
+    for strategy in [
+        "top1_tansho", "top1_fukusho", "top3_fukusho",
+        "top2_umaren", "top2_umatan", "top3_sanrenpuku", "top3_sanrentan",
+        "value_bet_tansho", "value_bet_umaren",
+    ]:
+        result = evaluator.simulate_return(
+            valid_df, trainer.feature_columns, model,
+            strategy=strategy, ranking=ranking,
+            target_type=target_type,
+            odds_correction_config=odds_correction_config,
+            calibrator=trainer.calibrator,
+            prob_method=prob_method,
+        )
+        logger.info(
+            "  [%s] 回収率: %.1f%%, 的中率: %.1f%% (%d/%d)",
+            strategy,
+            result["return_rate"],
+            result["hit_rate"] * 100,
+            result["win_count"],
+            result["bet_count"],
+        )
+
+
 def step_train(
     train_df: pd.DataFrame,
     valid_df: pd.DataFrame,
@@ -412,58 +516,13 @@ def step_train(
     # 保存
     trainer.save_model(name=model_name, target_type=target_type)
 
-    # 特徴量重要度
-    logger.info("=" * 60)
-    logger.info("Step 3: 特徴量重要度")
-    logger.info("=" * 60)
-    imp = trainer.get_feature_importance(top_n=30)
-    logger.info("Top 30 特徴量重要度:")
-    for _, row in imp.iterrows():
-        logger.info("  %s: %.1f", row["feature"], row["importance"])
-
-    # 評価
-    logger.info("=" * 60)
-    logger.info("Step 4: モデル評価")
-    logger.info("=" * 60)
-    evaluator = ModelEvaluator()
-    metrics = evaluator.evaluate(
-        model, valid_df, trainer.feature_columns,
-        target_col=target_col, ranking=ranking,
-        calibrator=trainer.calibrator,
+    # Steps 3-5
+    step_evaluate_and_simulate(
+        trainer, valid_df,
+        target_type=target_type, ranking=ranking,
+        odds_correction_config=odds_correction_config,
+        prob_method=prob_method,
     )
-
-    logger.info("評価結果:")
-    for k, v in metrics.items():
-        if isinstance(v, float):
-            logger.info("  %s: %.4f", k, v)
-        else:
-            logger.info("  %s: %s", k, v)
-
-    # 回収率シミュレーション
-    logger.info("=" * 60)
-    logger.info("Step 5: 回収率シミュレーション")
-    logger.info("=" * 60)
-    for strategy in [
-        "top1_tansho", "top1_fukusho", "top3_fukusho",
-        "top2_umaren", "top2_umatan", "top3_sanrenpuku", "top3_sanrentan",
-        "value_bet_tansho", "value_bet_umaren",
-    ]:
-        result = evaluator.simulate_return(
-            valid_df, trainer.feature_columns, model,
-            strategy=strategy, ranking=ranking,
-            target_type=target_type,
-            odds_correction_config=odds_correction_config,
-            calibrator=trainer.calibrator,
-            prob_method=prob_method,
-        )
-        logger.info(
-            "  [%s] 回収率: %.1f%%, 的中率: %.1f%% (%d/%d)",
-            strategy,
-            result["return_rate"],
-            result["hit_rate"] * 100,
-            result["win_count"],
-            result["bet_count"],
-        )
 
 
 def step_eval_only(args: argparse.Namespace) -> None:
@@ -554,6 +613,116 @@ def step_build_odds_stats(args: argparse.Namespace) -> None:
     save_odds_correction_stats(stats)
 
 
+def step_tune(
+    args: argparse.Namespace,
+    odds_correction_config: dict | None = None,
+) -> None:
+    """Optuna でハイパーパラメータチューニング → 最終学習 → 評価."""
+    from src.model.tuner import RankingTuner
+
+    # 特徴量ロード
+    train_df, valid_df = step_load_features(args)
+
+    target_type = args.target
+
+    # NaN のある行を除外
+    relevance_col = (
+        "target_relevance_win"
+        if args.relevance_mode == "win"
+        else "target_relevance"
+    )
+    drop_cols = [
+        c
+        for c in ["target", relevance_col]
+        if c in train_df.columns
+    ]
+    train_df = train_df.dropna(subset=drop_cols).copy()
+    valid_df = valid_df.dropna(subset=drop_cols).copy()
+
+    # チューニング
+    logger.info("=" * 60)
+    logger.info("Step T: ハイパーパラメータチューニング（Optuna）")
+    logger.info("=" * 60)
+
+    tuner = RankingTuner(
+        n_trials=args.n_trials,
+        timeout=args.tune_timeout,
+        ndcg_at=args.ndcg_at,
+        relevance_mode=args.relevance_mode,
+    )
+    best_params = tuner.tune(train_df, valid_df)
+
+    # ベストパラメータ保存
+    tuner.save_best_params(best_params, args.model_name)
+
+    # 最終学習
+    logger.info("=" * 60)
+    logger.info("Step 2: 最終モデル学習（ベストパラメータ）")
+    logger.info("=" * 60)
+
+    trainer = tuner.train_best(train_df, valid_df, best_params)
+    trainer.save_model(name=args.model_name, target_type=target_type)
+
+    # Steps 3-5
+    step_evaluate_and_simulate(
+        trainer, valid_df,
+        target_type=target_type, ranking=True,
+        odds_correction_config=odds_correction_config,
+        prob_method=args.prob_method,
+    )
+
+
+def step_use_best_params(
+    args: argparse.Namespace,
+    odds_correction_config: dict | None = None,
+) -> None:
+    """保存済みベストパラメータで学習 → 評価."""
+    from src.model.tuner import RankingTuner
+
+    best_params = RankingTuner.load_best_params(args.model_name)
+    logger.info("保存済みベストパラメータ: %s", best_params)
+
+    full_params = dict(LGBM_PARAMS_RANKING)
+    clean_params = {
+        k: v for k, v in best_params.items() if k != "use_max_depth"
+    }
+    full_params.update(clean_params)
+
+    # 特徴量ロード
+    train_df, valid_df = step_load_features(args)
+
+    target_type = args.target
+    target_col = "target_win" if target_type == "win" else "target"
+
+    # NaN のある行を除外
+    drop_cols = [target_col]
+    if "target_relevance" in train_df.columns:
+        drop_cols.append("target_relevance")
+    train_df = train_df.dropna(subset=drop_cols).copy()
+    valid_df = valid_df.dropna(subset=drop_cols).copy()
+
+    # 学習
+    logger.info("=" * 60)
+    logger.info("Step 2: モデル学習（ベストパラメータ）")
+    logger.info("=" * 60)
+
+    trainer = ModelTrainer(
+        params=full_params,
+        ranking=True,
+        relevance_mode=args.relevance_mode,
+    )
+    trainer.train(train_df, valid_df)
+    trainer.save_model(name=args.model_name, target_type=target_type)
+
+    # Steps 3-5
+    step_evaluate_and_simulate(
+        trainer, valid_df,
+        target_type=target_type, ranking=True,
+        odds_correction_config=odds_correction_config,
+        prob_method=args.prob_method,
+    )
+
+
 def step_build_supplements(args: argparse.Namespace) -> None:
     """サプリメント（差分特徴量）を構築する."""
     from src.features.supplement import (
@@ -613,7 +782,19 @@ def main() -> None:
 
     odds_correction_config = _build_odds_correction_config(args)
 
-    if args.eval_only:
+    if args.tune:
+        # --tune は LambdaRank を暗黙的に有効化
+        if not args.ranking:
+            logger.info("--tune は LambdaRank モードを暗黙的に有効化します")
+        step_tune(args, odds_correction_config=odds_correction_config)
+
+    elif args.use_best_params:
+        # --use-best-params は LambdaRank を暗黙的に有効化
+        if not args.ranking:
+            logger.info("--use-best-params は LambdaRank モードを暗黙的に有効化します")
+        step_use_best_params(args, odds_correction_config=odds_correction_config)
+
+    elif args.eval_only:
         # 評価・回収率シミュレーションのみ
         step_eval_only(args)
 

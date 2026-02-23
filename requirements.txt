@@ -8,4 +8,5 @@ matplotlib>=3.7
 seaborn>=0.12
 tqdm>=4.65
 optuna>=3.0
+optuna-integration[lightgbm]>=4.0
 pyarrow>=12.0
